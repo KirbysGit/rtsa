@@ -1,7 +1,11 @@
-../venv/
+venv/
+.venv/
+env/
+.env/
 __pycache__/
 *.pyc
 *.csv
 *.json
 *.log
-*.txt
+.env
+.DS_Store
