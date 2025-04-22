@@ -52,7 +52,7 @@ def test_stock_processor():
 
 def test_reddit_processor():
     """Test Reddit data processor with sample data"""
-    from src.data_processing.reddit_processor import RedditDataProcessor
+    from src.data_processing.reddit_data_processor import RedditDataProcessor
     from src.data_collection.reddit_collector import RedditDataCollector
     
     # Initialize processors
