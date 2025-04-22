@@ -46,7 +46,8 @@ class StockDataCollector:
                              timedelta(days=min_history_days)).strftime('%Y-%m-%d')
         
         # Set Data Path.
-        self.data_path = RAW_DIR
+        self.data_path = RAW_DIR / "stock_data"
+        self.data_path.mkdir(parents=True, exist_ok=True)
     
     # -----------------------------------------------------------------------------------------------
 

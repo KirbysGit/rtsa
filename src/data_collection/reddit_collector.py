@@ -7,11 +7,22 @@ import os
 import logging
 import pandas as pd
 from praw import Reddit
-from datetime import datetime
+from datetime import datetime, timedelta
 from src.utils.path_config import RAW_DIR
 
 # Setup Logging.
 logger = logging.getLogger(__name__)
+
+# Constants
+TICKERS = ['NVDA', 'NVIDIA', 'AMD', 'INTC', 'TSMC']
+SUBREDDITS = {
+    'wallstreetbets': ['DD', 'Discussion', 'News'],
+    'stocks': ['DD', 'Discussion', 'News'],
+    'investing': ['Discussion', 'News'],
+    'nvidia': ['Discussion', 'News', 'Rumor'],
+    'AMD_Stock': ['Discussion', 'News'],
+    'StockMarket': ['Discussion', 'News']
+}
 
 # Reddit Data Collector Class.
 class RedditDataCollector:
@@ -22,14 +33,6 @@ class RedditDataCollector:
     def __init__(self, data_dir=None):
         """Initialize the Reddit Data Collector."""
         self.data_dir = data_dir or (RAW_DIR / "reddit_data")
-        self.subreddits = [
-            'wallstreetbets',
-            'stocks',
-            'investing',
-            'nvidia',
-            'AMD_Stock',
-            'StockMarket'
-        ]
         os.makedirs(self.data_dir, exist_ok=True)
         self.reddit = self._init_reddit()
         
@@ -48,63 +51,78 @@ class RedditDataCollector:
     
     # -----------------------------------------------------------------------------------------------
     
-    def fetch_subreddit_posts(self, subreddit_name, limit=100, sort='hot'):
+    def fetch_subreddit_posts(self, subreddit_name, limit=100, sort='hot', query=None, time_filter='month'):
         """
-        Fetch Posts from a Subreddit.
+        Fetch Posts from a Subreddit with enhanced filtering.
         
         Args:
-            subreddit_name (str): Name of Subreddit.
-            limit (int): Number of Posts to Fetch.
-            sort (str): Sort Method ('hot', 'new', 'top').
+            subreddit_name (str): Name of Subreddit
+            limit (int): Number of Posts to Fetch
+            sort (str): Sort Method ('hot', 'new', 'top', 'relevance')
+            query (str): Optional search query
+            time_filter (str): Time period to search ('day', 'week', 'month', 'year', 'all')
         """
         try:
-            # Initialize Subreddit.
             subreddit = self.reddit.subreddit(subreddit_name)
             posts_data = []
             
-            # Get Posts Based on Sort Method.
-            if sort == 'hot':
+            # Get posts based on sort method or search query
+            if query:
+                posts = subreddit.search(
+                    query, 
+                    sort=sort, 
+                    limit=limit,
+                    time_filter=time_filter
+                )
+            elif sort == 'hot':
                 posts = subreddit.hot(limit=limit)
             elif sort == 'new':
                 posts = subreddit.new(limit=limit)
             elif sort == 'top':
-                posts = subreddit.top(limit=limit)
+                posts = subreddit.top(time_filter=time_filter, limit=limit)
             
-            # Get Comments for Each Post.
+            # Process each post
             for post in posts:
-                # Replace More Comments.
+                # Skip if post is too old
+                post_date = datetime.fromtimestamp(post.created_utc)
+                if post_date < datetime.now() - timedelta(days=30):
+                    continue
+                
+                # Replace More Comments
                 post.comments.replace_more(limit=0)
                 
-                # Get Top 5 Comments.
+                # Get top comments
                 top_comments = list(post.comments)[:5]
                 
-                # Create Post Data Dictionary.
+                # Create post data dictionary
                 post_data = {
                     'id': post.id,
                     'title': post.title,
                     'text': post.selftext,
                     'score': post.score,
                     'num_comments': post.num_comments,
-                    'created_utc': datetime.fromtimestamp(post.created_utc),
+                    'created_utc': post_date,
                     'url': post.url,
                     'upvote_ratio': post.upvote_ratio,
-                    'top_comments': [c.body for c in top_comments]
+                    'top_comments': [c.body for c in top_comments],
+                    'subreddit': subreddit_name,
+                    'flair': post.link_flair_text
                 }
-
-                # Append Post Data to List.
+                
                 posts_data.append(post_data)
             
-            # Save to CSV.
-            df = pd.DataFrame(posts_data)
-            filename = f"{subreddit_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            filepath = os.path.join(self.data_dir, filename)
-            df.to_csv(filepath, index=False)
+            # Save to CSV
+            if posts_data:
+                df = pd.DataFrame(posts_data)
+                filename = f"{subreddit_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                filepath = os.path.join(self.data_dir, filename)
+                df.to_csv(filepath, index=False)
+                logger.info(f"Saved {len(posts_data)} posts from r/{subreddit_name} to {filename}")
             
-            logger.info(f"Successfully Collected {len(posts_data)} Posts from r/{subreddit_name}")
-            return df
+            return pd.DataFrame(posts_data) if posts_data else None
             
         except Exception as e:
-            logger.error(f"Error Fetching Data from r/{subreddit_name}: {str(e)}")
+            logger.error(f"Error fetching data from r/{subreddit_name}: {str(e)}")
             return None
         
     # -----------------------------------------------------------------------------------------------
@@ -144,25 +162,73 @@ class RedditDataCollector:
     # -----------------------------------------------------------------------------------------------
 
     def fetch_all_subreddits(self, ticker, limit=50):
-        """Fetch Posts from All Monitored Subreddits."""
-
-        # Initialize List to Store All Posts.
+        """Fetch recent posts from all monitored subreddits for a given ticker."""
         all_posts = []
-
-        # Initialize Search Terms.
+        
+        # Define search terms
         search_terms = [
             f"{ticker} stock",
             f"{ticker} price",
             f"{ticker} analysis",
-            f"{ticker} DD"
+            f"{ticker} DD",
+            f"{ticker} earnings",
+            f"{ticker} news"
         ]
-
-        # Fetch Posts from All Subreddits.
-        for subreddit_name in self.subreddits:
+        
+        # Fetch from each subreddit
+        for subreddit_name, flairs in SUBREDDITS.items():
+            logger.info(f"Fetching posts from r/{subreddit_name} for {ticker}")
+            
+            # Try search queries
             for term in search_terms:
-                posts = self.fetch_subreddit_posts(subreddit_name, query=term, limit=limit)
+                posts = self.fetch_subreddit_posts(
+                    subreddit_name,
+                    query=term,
+                    limit=limit,
+                    time_filter='month'
+                )
+                if posts is not None:
+                    all_posts.append(posts)
+            
+            # Also get recent posts from relevant subreddits
+            if subreddit_name.lower() in [t.lower() for t in TICKERS]:
+                posts = self.fetch_subreddit_posts(
+                    subreddit_name,
+                    limit=limit,
+                    time_filter='month'
+                )
                 if posts is not None:
                     all_posts.append(posts)
         
-        # Return All Posts as DataFrame.
-        return pd.concat(all_posts) if all_posts else None 
+        # Combine all posts
+        if all_posts:
+            combined_df = pd.concat(all_posts, ignore_index=True)
+            logger.info(f"Collected {len(combined_df)} total posts for {ticker}")
+            return combined_df
+        else:
+            logger.warning(f"No posts collected for {ticker}")
+            return None
+
+def main():
+    """Main function to test the RedditDataCollector."""
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # Initialize collector
+    collector = RedditDataCollector()
+
+    # Test with NVDA ticker
+    df = collector.fetch_all_subreddits(ticker='NVDA', limit=25)
+
+    if df is not None:
+        print(f"Collected {len(df)} total posts.")
+        print(f"Date range: {df['created_utc'].min()} to {df['created_utc'].max()}")
+    else:
+        print("No posts were collected.")
+
+if __name__ == "__main__":
+    main() 
