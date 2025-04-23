@@ -51,7 +51,7 @@ class RedditDataCollector:
     
     # -----------------------------------------------------------------------------------------------
     
-    def fetch_subreddit_posts(self, subreddit_name, limit=100, sort='hot', query=None, time_filter='month'):
+    def fetch_subreddit_posts(self, subreddit_name, limit=100, sort='hot', time_filter='day'):
         """
         Fetch Posts from a Subreddit with enhanced filtering.
         
@@ -59,22 +59,14 @@ class RedditDataCollector:
             subreddit_name (str): Name of Subreddit
             limit (int): Number of Posts to Fetch
             sort (str): Sort Method ('hot', 'new', 'top', 'relevance')
-            query (str): Optional search query
             time_filter (str): Time period to search ('day', 'week', 'month', 'year', 'all')
         """
         try:
             subreddit = self.reddit.subreddit(subreddit_name)
             posts_data = []
             
-            # Get posts based on sort method or search query
-            if query:
-                posts = subreddit.search(
-                    query, 
-                    sort=sort, 
-                    limit=limit,
-                    time_filter=time_filter
-                )
-            elif sort == 'hot':
+            # Get posts based on sort method
+            if sort == 'hot':
                 posts = subreddit.hot(limit=limit)
             elif sort == 'new':
                 posts = subreddit.new(limit=limit)
@@ -161,41 +153,22 @@ class RedditDataCollector:
 
     # -----------------------------------------------------------------------------------------------
 
-    def fetch_all_subreddits(self, ticker, limit=50):
-        """Fetch recent posts from all monitored subreddits for a given ticker."""
+    def fetch_all_subreddits(self, limit=50):
+        """Fetch recent posts from all monitored subreddits."""
         all_posts = []
-        
-        # Define search terms
-        search_terms = [
-            f"{ticker} stock",
-            f"{ticker} price",
-            f"{ticker} analysis",
-            f"{ticker} DD",
-            f"{ticker} earnings",
-            f"{ticker} news"
-        ]
+        subreddits = ['wallstreetbets', 'stocks', 'investing', 'StockMarket']
         
         # Fetch from each subreddit
-        for subreddit_name, flairs in SUBREDDITS.items():
-            logger.info(f"Fetching posts from r/{subreddit_name} for {ticker}")
+        for subreddit_name in subreddits:
+            logger.info(f"Fetching posts from r/{subreddit_name}")
             
-            # Try search queries
-            for term in search_terms:
-                posts = self.fetch_subreddit_posts(
-                    subreddit_name,
-                    query=term,
-                    limit=limit,
-                    time_filter='month'
-                )
-                if posts is not None:
-                    all_posts.append(posts)
-            
-            # Also get recent posts from relevant subreddits
-            if subreddit_name.lower() in [t.lower() for t in TICKERS]:
+            # Try different sort methods
+            for sort in ['hot', 'new', 'top']:
                 posts = self.fetch_subreddit_posts(
                     subreddit_name,
                     limit=limit,
-                    time_filter='month'
+                    sort=sort,
+                    time_filter='day'
                 )
                 if posts is not None:
                     all_posts.append(posts)
@@ -203,10 +176,10 @@ class RedditDataCollector:
         # Combine all posts
         if all_posts:
             combined_df = pd.concat(all_posts, ignore_index=True)
-            logger.info(f"Collected {len(combined_df)} total posts for {ticker}")
+            logger.info(f"Collected {len(combined_df)} total posts")
             return combined_df
         else:
-            logger.warning(f"No posts collected for {ticker}")
+            logger.warning("No posts collected")
             return None
 
 def main():
@@ -221,8 +194,8 @@ def main():
     # Initialize collector
     collector = RedditDataCollector()
 
-    # Test with NVDA ticker
-    df = collector.fetch_all_subreddits(ticker='NVDA', limit=25)
+    # Collect posts from all subreddits
+    df = collector.fetch_all_subreddits(limit=25)
 
     if df is not None:
         print(f"Collected {len(df)} total posts.")

@@ -8,8 +8,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 MERGED_DIR = DATA_DIR / "merged"
+DEBUG_DIR = DATA_DIR / "debug"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
 # Ensure directories exist
-for directory in [DATA_DIR, RAW_DIR, PROCESSED_DIR, MERGED_DIR, RESULTS_DIR]:
+for directory in [DATA_DIR, RAW_DIR, PROCESSED_DIR, MERGED_DIR, DEBUG_DIR, RESULTS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from datetime import datetime, timedelta
 from src.utils.path_config import RAW_DIR
+import os
 
 # Setup Logging.
 logger = logging.getLogger(__name__)
@@ -23,31 +24,10 @@ class StockDataCollector:
 
     """Collects Historical Stock Data with Enhanced Error Handling and Validation."""
     
-    def __init__(self, symbols: List[str], 
-                 start_date: Optional[str] = None,
-                 end_date: Optional[str] = None,
-                 min_history_days: int = 120):
-        self.symbols = symbols
-        self.end_date = end_date or datetime.now().strftime('%Y-%m-%d')
-        
-        # Calculate Start Date to Ensure Minimum History.
-        if start_date:
-            # Parse Start Date.
-            requested_start = datetime.strptime(start_date, '%Y-%m-%d')
-
-            # Calculate Minimum Start Date.
-            min_start = datetime.strptime(self.end_date, '%Y-%m-%d') - timedelta(days=min_history_days)
-
-            # Set Start Date.
-            self.start_date = min(requested_start, min_start).strftime('%Y-%m-%d')
-        else:
-            # Calculate Minimum Start Date.
-            self.start_date = (datetime.strptime(self.end_date, '%Y-%m-%d') - 
-                             timedelta(days=min_history_days)).strftime('%Y-%m-%d')
-        
-        # Set Data Path.
-        self.data_path = RAW_DIR / "stock_data"
-        self.data_path.mkdir(parents=True, exist_ok=True)
+    def __init__(self, data_dir=None):
+        """Initialize the Stock Data Collector."""
+        self.data_dir = data_dir or (RAW_DIR / "stock_data")
+        os.makedirs(self.data_dir, exist_ok=True)
     
     # -----------------------------------------------------------------------------------------------
 
@@ -158,7 +138,7 @@ class StockDataCollector:
 
     def _save_data(self, df: pd.DataFrame, symbol: str) -> None:
         """Save the Collected Data."""
-        output_file = self.data_path / f"{symbol}_stock_data.csv"
+        output_file = self.data_dir / f"{symbol}_stock_data.csv"
         df.to_csv(output_file, index=False)
         
         # Save Metadata.
@@ -173,39 +153,91 @@ class StockDataCollector:
             'data_version': '1.0'
         }
         
-        metadata_file = self.data_path / f"{symbol}_stock_metadata.json"
+        metadata_file = self.data_dir / f"{symbol}_stock_metadata.json"
         with open(metadata_file, 'w') as f:
             json.dump(metadata, f, indent=4)
         
         logger.info(f"Stock data saved to: {output_file}")
         logger.info(f"Metadata saved to: {metadata_file}")
 
+    def fetch_stock_data(self, ticker, start_date, end_date):
+        """
+        Fetch stock data for a given ticker and date range.
+        
+        Args:
+            ticker (str): Stock ticker symbol
+            start_date (str): Start date in YYYY-MM-DD format
+            end_date (str): End date in YYYY-MM-DD format
+            
+        Returns:
+            pd.DataFrame: Stock data with OHLCV and additional metrics
+        """
+        try:
+            # Fetch data from Yahoo Finance
+            stock = yf.Ticker(ticker)
+            df = stock.history(start=start_date, end=end_date)
+            
+            if df.empty:
+                logger.warning(f"No data found for {ticker}")
+                return None
+                
+            # Calculate additional metrics
+            df['Daily_Return'] = df['Close'].pct_change()
+            df['Volume_MA'] = df['Volume'].rolling(window=5).mean()
+            df['Price_MA'] = df['Close'].rolling(window=5).mean()
+            df['RSI'] = self._calculate_rsi(df['Close'])
+            
+            # Reset index to make Date a column
+            df = df.reset_index()
+            df.rename(columns={'index': 'Date'}, inplace=True)
+            
+            # Add ticker column
+            df['Ticker'] = ticker
+            
+            logger.info(f"Successfully collected data for {ticker}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching data for {ticker}: {str(e)}")
+            return None
+            
+    def _calculate_rsi(self, prices, period=14):
+        """Calculate Relative Strength Index."""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
 # -----------------------------------------------------------------------------------------------
 
 def main():
-    # Set Up Logging.
+    """Main function to test the StockDataCollector."""
+    # Set up logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     
-    # Define Symbols and Date Range.
-    symbols = ['NVDA']  # Add More Symbols as Needed.
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+    # Initialize collector
+    collector = StockDataCollector()
     
-    # Initialize Collector.
-    collector = StockDataCollector(symbols, start_date, end_date)
+    # Test with NVDA
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=7)
     
-    # Collect Data.
-    data = collector.collect_data()
+    df = collector.fetch_stock_data(
+        ticker='NVDA',
+        start_date=start_date.strftime('%Y-%m-%d'),
+        end_date=end_date.strftime('%Y-%m-%d')
+    )
     
-    # Report Results.
-    for symbol, df in data.items():
-        logger.info(f"Collected {len(df)} Days of Data for {symbol}")
-        logger.info(f"Date Range: {df['Date'].min()} to {df['Date'].max()}")
-        logger.info(f"Data Saved to: {collector.data_path}/{symbol}_stock_data.csv")
+    if df is not None:
+        print(f"Collected {len(df)} days of data for NVDA")
+        print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
+    else:
+        print("No data was collected.")
 
 if __name__ == "__main__":
     main() 
