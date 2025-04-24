@@ -11,54 +11,105 @@ import yfinance as yf
 from colorama import Fore, Style
 import requests
 from bs4 import BeautifulSoup
+from collections import defaultdict
+import os
 
 # Local Imports.
-from src.utils.path_config import DEBUG_DIR
+from src.utils.path_config import DEBUG_DIR, ENTITY_CACHE_FILE, REFERENCES_DIR
 
 # Initialize logger.
 logger = logging.getLogger(__name__)
 
 class EntityLinker:
-    def __init__(self, cache_duration_hours: int = 24):
-        """Initialize the EntityLinker with caching."""
-        # Initialize paths and basic attributes
-        self.cache_duration = timedelta(hours=cache_duration_hours)
-        self.cache_file = DEBUG_DIR / "entity_cache.json"
-        self.match_history = []
+    """Links entity mentions to known entities."""
+    
+    def __init__(self, cache_duration_days: int = 1):
+        """Initialize the entity linker."""
+        # Initialize cache file path
+        self.cache_file = Path(os.path.join(REFERENCES_DIR, 'entity_cache.json'))
+        self.cache_duration = timedelta(days=cache_duration_days)
         
         # Initialize common word tickers to filter out
         self.common_word_tickers = {
-            'A', 'I', 'AM', 'BE', 'DO', 'GO', 'IF', 'IN', 'IS', 'IT', 'ME', 'MY', 'NO', 'OF', 'ON', 'OR', 'SO', 'TO', 'UP', 'US', 'WE',
-            'ALL', 'AND', 'ANY', 'ARE', 'BAD', 'BIG', 'BUT', 'CAN', 'DAY', 'DID', 'FOR', 'GET', 'GOT', 'HAD', 'HAS', 'HER', 'HIM', 'HIS',
-            'HOW', 'LAW', 'LET', 'MAN', 'NEW', 'NOT', 'NOW', 'OLD', 'ONE', 'OUR', 'OUT', 'PAY', 'PUT', 'SAY', 'SEE', 'SHE', 'TWO', 'USE',
-            'WAY', 'WHO', 'WHY', 'YES', 'YOU', 'ABLE', 'ALSO', 'AWAY', 'BACK', 'BEST', 'CALM', 'CASE', 'COST', 'DARE', 'DEAL', 'DEAR',
-            'EACH', 'ELSE', 'EVEN', 'EVER', 'FACT', 'FAIR', 'FAST', 'FIND', 'FREE', 'FULL', 'GAVE', 'GIVE', 'GONE', 'GOOD', 'GREW',
-            'GROW', 'HAVE', 'HERE', 'HIGH', 'INTO', 'JUST', 'KEEP', 'KIND', 'KNEW', 'KNOW', 'LAST', 'LATE', 'LESS', 'LIFE', 'LIKE',
-            'LINE', 'LIVE', 'LONG', 'LOOK', 'LOVE', 'MADE', 'MAKE', 'MANY', 'MIND', 'MORE', 'MOST', 'MOVE', 'MUST', 'NEAR', 'NEED',
-            'NEXT', 'NICE', 'ONCE', 'ONLY', 'OPEN', 'OVER', 'PART', 'PAST', 'PLAN', 'PLAY', 'REAL', 'SAID', 'SAME', 'SAVE', 'SEEM',
-            'SELF', 'SEND', 'SENT', 'SHOW', 'SIDE', 'SOME', 'SOON', 'STAY', 'SURE', 'TAKE', 'TALK', 'TELL', 'THAN', 'THAT', 'THEM',
-            'THEN', 'THEY', 'THIS', 'TIME', 'TRUE', 'TURN', 'VERY', 'WANT', 'WELL', 'WENT', 'WERE', 'WHAT', 'WHEN', 'WILL', 'WITH',
-            'WORK', 'YEAR', 'YOUR'
+            'A', 'ALL', 'AM', 'AN', 'AND', 'ANY', 'ARE', 'AS', 'AT', 'BE', 'BY', 'CAN', 'DO', 'FOR', 'FROM', 'GO', 'HAS',
+            'HAD', 'HE', 'HER', 'HERE', 'HIS', 'HOW', 'I', 'IF', 'IN', 'INTO', 'IS', 'IT', 'ITS', 'JOB', 'MAY', 'ME',
+            'MOST', 'MY', 'NEW', 'NO', 'NOT', 'NOW', 'OF', 'ON', 'ONE', 'OR', 'OUR', 'OUT', 'OVER', 'SEE', 'SHE', 'SO',
+            'SOME', 'THAN', 'THAT', 'THE', 'THEIR', 'THEM', 'THEN', 'THERE', 'THESE', 'THEY', 'THIS', 'TO', 'UP', 'US',
+            'WAS', 'WE', 'WERE', 'WHAT', 'WHEN', 'WHO', 'WILL', 'WITH', 'YOU', 'YOUR'
         }
         
-        # Initialize ETF tickers that should always be considered valid
+        # Initialize valid ETFs that should always be considered valid
         self.valid_etfs = {
-            'SPY', 'QQQ', 'IWM', 'DIA', 'VTI', 'VOO', 'VEA', 'VWO', 'BND', 'AGG', 'GLD', 'SLV', 'VGK', 'EEM', 'TLT', 'LQD', 'HYG',
-            'XLF', 'XLE', 'XLV', 'XLK', 'XLI', 'XLP', 'XLY', 'XLB', 'XLU', 'XLRE', 'XLC', 'ARKK', 'ARKG', 'ARKW', 'ARKF', 'ARKQ'
+            'SPY', 'QQQ', 'IWM', 'DIA', 'VTI', 'VOO', 'VEA', 'VWO', 'BND', 'AGG', 'TLT', 'IEF', 'SHY', 'LQD', 'HYG',
+            'GLD', 'SLV', 'USO', 'UNG', 'DBC', 'VNQ', 'XLF', 'XLE', 'XLV', 'XLK', 'XLI', 'XLP', 'XLY', 'XLB', 'XLU',
+            'XLRE', 'XLC', 'EEM', 'EFA', 'IEMG', 'IEFA', 'ARKK', 'ARKG', 'ARKW', 'ARKF', 'ARKQ', 'TQQQ', 'SQQQ', 'UVXY',
+            'VXX', 'VIXY', 'SVXY', 'UVIX', 'SPXU', 'SPXS', 'SPXL', 'UPRO', 'TMF', 'TMV', 'TYD', 'TYO', 'UUP', 'UDN',
+            'FXE', 'FXY', 'FXB', 'FXF', 'FXC', 'FXA'
         }
         
-        # Initialize fallback entities first
+        # Initialize tracking
+        self.match_history = []
+        self.entities = {}
+        
+        # Initialize fallback entities
         self._fallback_entities = self._get_fallback_entities()
         
-        # Load or update cache last
-        self.entity_map = self._load_or_update_cache()
+        # Load cached entities
+        self._load_cached_entities()
+        
+        print(f"\n{Fore.CYAN}Initializing Entity Linker...{Style.RESET_ALL}")
+        
+        # Initialize confidence scores
+        self.confidence_scores = defaultdict(list)
+        
+        print(f"{Fore.GREEN}✓ Entity Linker initialized successfully{Style.RESET_ALL}\n")
+    
+    def _load_cached_entities(self):
+        """Load entity cache from file."""
+        try:
+            if self.cache_file.exists():
+                with open(self.cache_file, 'r') as f:
+                    cache = json.load(f)
+                    
+                # Verify cache structure
+                if isinstance(cache, dict) and 'entities' in cache:
+                    print(f"{Fore.GREEN}✓ Loaded {len(cache['entities'])} entities from cache{Style.RESET_ALL}")
+                    self.entities = cache['entities']
+                else:
+                    print(f"{Fore.YELLOW}No valid entity cache found, starting fresh{Style.RESET_ALL}")
+                    self.entities = {}
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"{Fore.RED}✗ Error loading entity cache: {str(e)}{Style.RESET_ALL}")
+            self.entities = {}
+    
+    def _save_entity_cache(self):
+        """Save entity cache to file."""
+        try:
+            # Prepare cache data with list conversion for JSON serialization
+            cache_data = {
+                'last_update': datetime.now().isoformat(),
+                'entities': self.entities
+            }
+            
+            # Ensure directory exists
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save cache
+            with open(self.cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+                
+            print(f"{Fore.GREEN}✓ Saved {len(self.entities)} entities to cache{Style.RESET_ALL}")
+            
+        except Exception as e:
+            print(f"{Fore.RED}✗ Error saving entity cache: {str(e)}{Style.RESET_ALL}")
     
     def _load_or_update_cache(self) -> Dict:
         """Load entity cache or update if expired."""
         try:
             if self.cache_file.exists():
                 try:
-                    with open(self.cache_file, 'r') as f:
+                    with self.cache_file.open('r') as f:
                         cache = json.load(f)
                     
                     last_update = datetime.fromisoformat(cache['last_update'])
@@ -92,7 +143,11 @@ class EntityLinker:
             
             # Save to cache with error handling
             try:
-                with open(self.cache_file, 'w') as f:
+                # Ensure parent directory exists
+                self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Write cache file
+                with self.cache_file.open('w') as f:
                     json.dump(cache_data, f, indent=2)
                 print(f"{Fore.GREEN}✓ Updated entity cache with {len(entities)} stocks{Style.RESET_ALL}")
             except Exception as e:
@@ -265,102 +320,124 @@ class EntityLinker:
             }
         }
     
-    def validate_context(self, text: str, ticker: str, context_window: int = 50) -> Tuple[bool, float, List[str]]:
-        """Validate if ticker appears in meaningful context with known entities."""
-        if not text or not ticker:
-            return False, 0.0, []
+    def validate_context(self, text: str, ticker: str) -> Tuple[bool, float]:
+        """Validate if a ticker appears in a meaningful context with known entities.
         
+        Args:
+            text (str): The text to validate
+            ticker (str): The ticker to validate
+            
+        Returns:
+            Tuple[bool, float]: (is_valid, match_strength)
+        """
+        # Return false if text or ticker is empty
+        if not text or not ticker:
+            return False, 0.0
+            
+        # Convert text to lowercase and ticker to uppercase for comparison
         text = text.lower()
         ticker = ticker.upper()
         
         # Always accept valid ETFs
         if ticker in self.valid_etfs:
-            return True, 1.0, [f"Valid ETF: {ticker}"]
-        
-        # Reject common word tickers unless they have very strong context
+            self.match_history.append({
+                'ticker': ticker,
+                'text': text,
+                'match_type': 'ETF',
+                'match_strength': 1.0
+            })
+            return True, 1.0
+            
+        # Reject common word tickers unless they have strong context
         if ticker in self.common_word_tickers:
-            # Get context window
-            context = self._get_context_window(text, ticker.lower(), context_window)
-            if not context:
-                return False, 0.0, []
+            # Get entity info from cache or fallback
+            entity_info = self.entities.get(ticker) or self._fallback_entities.get(ticker, {})
             
-            # Check for strong financial indicators
-            dollar_symbol = f"${ticker.lower()}" in text
-            stock_mention = any(term in context.lower() for term in ['stock', 'share', 'ticker', 'etf', 'trading'])
+            # Only accept if we have strong entity matches
+            if not entity_info:
+                return False, 0.0
+                
+            # Check for strong company name match
+            company_name = entity_info.get('company_name', '').lower()
+            if company_name and company_name in text:
+                self.match_history.append({
+                    'ticker': ticker,
+                    'text': text,
+                    'match_type': 'STRONG_COMPANY_NAME',
+                    'match_strength': 1.0
+                })
+                return True, 1.0
+                
+            # Check for strong officer match
+            officers = entity_info.get('officers', [])
+            if any(officer.lower() in text for officer in officers):
+                self.match_history.append({
+                    'ticker': ticker,
+                    'text': text, 
+                    'match_type': 'STRONG_OFFICER',
+                    'match_strength': 0.9
+                })
+                return True, 0.9
+                
+            # Reject common word ticker without strong context
+            return False, 0.0
             
-            # Only allow if it has explicit stock context
-            if not (dollar_symbol and stock_mention):
-                return False, 0.0, [f"Rejected common word ticker: {ticker}"]
-        
-        # Get entity info
-        entity_info = self.entity_map.get(ticker)
+        # Get entity info for non-common word tickers
+        entity_info = self.entities.get(ticker) or self._fallback_entities.get(ticker, {})
         if not entity_info:
-            entity_info = self._fallback_entities.get(ticker)
-        
-        if not entity_info:
-            return False, 0.0, []
-        
-        # Get context window
-        context = self._get_context_window(text, ticker.lower(), context_window)
-        if not context:
-            return False, 0.0, []
-        
-        # Track matches found
-        matches = []
+            return False, 0.0
+            
         match_strength = 0.0
         
-        # Check for company name and aliases
-        for alias in entity_info['aliases']:
-            if alias in context:
-                matches.append(f"Company reference: {alias}")
-                match_strength += 0.4  # Strong match for company name
-        
-        # Check for officer mentions
-        for officer in entity_info.get('officers', []):
-            if officer in context:
-                matches.append(f"Officer mention: {officer}")
-                match_strength += 0.3  # Good match for officer names
-        
-        # Check for product mentions
-        for product in entity_info.get('products', []):
-            if product in context:
-                matches.append(f"Product mention: {product}")
-                match_strength += 0.2  # Moderate match for products
-        
-        # Check for industry/sector terms
+        # Check company name match
+        company_name = entity_info.get('company_name', '').lower()
+        if company_name and company_name in text:
+            match_strength = max(match_strength, 0.8)
+            self.match_history.append({
+                'ticker': ticker,
+                'text': text,
+                'match_type': 'COMPANY_NAME',
+                'match_strength': 0.8
+            })
+            
+        # Check officer matches
+        officers = entity_info.get('officers', [])
+        if any(officer.lower() in text for officer in officers):
+            match_strength = max(match_strength, 0.7)
+            self.match_history.append({
+                'ticker': ticker,
+                'text': text,
+                'match_type': 'OFFICER',
+                'match_strength': 0.7
+            })
+            
+        # Check product matches
+        products = entity_info.get('products', [])
+        if any(product.lower() in text for product in products):
+            match_strength = max(match_strength, 0.6)
+            self.match_history.append({
+                'ticker': ticker,
+                'text': text,
+                'match_type': 'PRODUCT',
+                'match_strength': 0.6
+            })
+            
+        # Check industry/sector matches
         industry = entity_info.get('industry', '').lower()
         sector = entity_info.get('sector', '').lower()
-        if industry and industry in context:
-            matches.append(f"Industry mention: {industry}")
-            match_strength += 0.1
-        if sector and sector in context:
-            matches.append(f"Sector mention: {sector}")
-            match_strength += 0.1
+        if (industry and industry in text) or (sector and sector in text):
+            match_strength = max(match_strength, 0.5)
+            self.match_history.append({
+                'ticker': ticker,
+                'text': text,
+                'match_type': 'INDUSTRY_SECTOR',
+                'match_strength': 0.5
+            })
+            
+        # Cap match strength at 1.0
+        match_strength = min(match_strength, 1.0)
         
-        # Cap the match strength
-        match_strength = min(1.0, match_strength)
-        
-        # Track match for debugging
-        self.match_history.append({
-            'timestamp': datetime.now().isoformat(),
-            'ticker': ticker,
-            'context': context,
-            'matches': matches,
-            'match_strength': match_strength
-        })
-        
-        return bool(matches), match_strength, matches
-    
-    def _get_context_window(self, text: str, target: str, window_size: int) -> str:
-        """Get text window around target word."""
-        words = text.split()
-        try:
-            idx = words.index(target.lower())
-            start = max(0, idx - window_size)
-            end = min(len(words), idx + window_size + 1)
-            return ' '.join(words[start:end])
-        except ValueError:
-            return ""
+        return match_strength > 0.0, match_strength
     
     def save_debug_info(self):
         """Save entity matching debug information."""
@@ -383,8 +460,8 @@ class EntityLinker:
     
     def get_confidence_class(self, ticker: str) -> str:
         """Get the confidence class for a ticker."""
-        if ticker in self.entity_map:
-            return self.entity_map[ticker].get('confidence_class', 'LOW')
+        if ticker in self.entities:
+            return self.entities[ticker].get('confidence_class', 'LOW')
         elif ticker in self._fallback_entities:
             return self._fallback_entities[ticker].get('confidence_class', 'LOW')
         return 'LOW' 

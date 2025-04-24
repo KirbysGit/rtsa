@@ -97,6 +97,9 @@ class RedditDataProcessor:
         self.textblob = TextBlob
         self.vader = SentimentIntensityAnalyzer()
         
+        # Initialize common word tickers
+        self.common_word_tickers = COMMON_WORDS
+        
         # Initialize FinBERT with optimized GPU settings
         print(f"{Fore.YELLOW}Initializing FinBERT model...{Style.RESET_ALL}")
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -338,87 +341,71 @@ class RedditDataProcessor:
         if not context:
             return False, 0.0
         
+        # Track feature attribution
+        attribution = {
+            'finbert_score': 0.0,
+            'entity_match': False,
+            'keyword_match': False,
+            'dollar_symbol': False,
+            'well_known': ticker in self.well_known_tickers,
+            'etf': ticker in self.valid_etfs
+        }
+        
         # Get traditional keyword-based scores
         strong_terms = sum(1 for term in STRONG_FINANCE_WORDS if term in context)
         weak_terms = sum(1 for term in WEAK_FINANCE_WORDS if term in context)
         keyword_confidence = min(1.0, (strong_terms * 0.4 + weak_terms * 0.15))
+        attribution['keyword_match'] = strong_terms > 0 or weak_terms > 0
         
         # Get FinBERT score
         finbert_score = self._get_finbert_score(text, ticker)
+        attribution['finbert_score'] = finbert_score
         
-        # Get entity validation with enhanced matching
-        has_entity, entity_boost, entity_matches = self.entity_linker.validate_context(text, ticker)
+        # Get entity validation
+        has_entity, entity_boost = self.entity_linker.validate_context(text, ticker)
+        attribution['entity_match'] = has_entity
         
-        # Enhanced confidence calculation based on entity matches
-        entity_confidence = 0.0
-        if has_entity:
-            # Count different types of matches
-            company_refs = sum(1 for m in entity_matches if "Company reference:" in m)
-            officer_refs = sum(1 for m in entity_matches if "Officer mention:" in m)
-            product_refs = sum(1 for m in entity_matches if "Product mention:" in m)
-            industry_refs = sum(1 for m in entity_matches if "Industry mention:" in m or "Sector mention:" in m)
-            
-            # Weight different types of matches
-            entity_confidence = min(1.0, (
-                company_refs * 0.4 +    # Company name matches are strongest
-                officer_refs * 0.3 +    # Officer mentions are good signals
-                product_refs * 0.2 +    # Product mentions help validate
-                industry_refs * 0.1     # Industry/sector provide context
-            ))
+        # Check for dollar symbol
+        attribution['dollar_symbol'] = f"${ticker}" in text
         
-        # Combine scores with emphasis on FinBERT for ambiguous tickers
-        if ticker in POTENTIALLY_AMBIGUOUS_TICKERS:
-            if not has_entity:  # Require entity match for ambiguous tickers
-                return False, 0.0
-            confidence = (
-                finbert_score * 0.4 + 
-                keyword_confidence * 0.2 + 
-                entity_confidence * 0.4  # Give more weight to entity matching for ambiguous tickers
-            )
-            has_context = finbert_score > 0.6 and entity_confidence > 0.4
-        else:
-            confidence = (
-                finbert_score * 0.4 + 
-                keyword_confidence * 0.3 + 
-                entity_confidence * 0.3
-            )
-            has_context = (
-                finbert_score > 0.4 or 
-                (strong_terms >= 1 and weak_terms >= 2) or
-                entity_confidence > 0.6
-            )
+        # Calculate final confidence
+        confidence = (
+            finbert_score * 0.4 + 
+            keyword_confidence * 0.3 + 
+            entity_boost * 0.3
+        )
         
-        # Determine confidence class with enhanced criteria
-        if has_context:
-            if has_entity and finbert_score > 0.6 and entity_confidence > 0.4:
-                self.confidence_classes['HIGH'].append({
-                    'ticker': ticker,
-                    'context': context,
-                    'finbert_score': finbert_score,
-                    'entity_matches': entity_matches,
-                    'entity_confidence': entity_confidence
-                })
-            elif finbert_score > 0.4 or entity_confidence > 0.3:
-                self.confidence_classes['MEDIUM'].append({
-                    'ticker': ticker,
-                    'context': context,
-                    'finbert_score': finbert_score,
-                    'entity_matches': entity_matches,
-                    'entity_confidence': entity_confidence
-                })
-            else:
-                self.confidence_classes['LOW'].append({
-                    'ticker': ticker,
-                    'context': context,
-                    'finbert_score': finbert_score,
-                    'entity_matches': entity_matches,
-                    'entity_confidence': entity_confidence
-                })
-        
-        # Additional boosts
-        if f"${ticker}" in text:
+        if attribution['dollar_symbol']:
             confidence = min(1.0, confidence + 0.3)
-            has_context = True
+        
+        # Determine if context is financial
+        has_context = (
+            finbert_score > 0.3 or
+            (strong_terms >= 1 and weak_terms >= 1) or
+            has_entity or
+            attribution['dollar_symbol']
+        )
+        
+        # Determine confidence class and log attribution
+        if has_context:
+            attribution_info = {
+                'ticker': ticker,
+                'context': context,
+                'finbert_score': finbert_score,
+                'entity_matches': [ticker],
+                'entity_confidence': entity_boost,
+                'final_confidence': confidence,
+                'attribution': attribution
+            }
+            
+            if ((has_entity and finbert_score > 0.4) or
+                (attribution['dollar_symbol'] and finbert_score > 0.3) or
+                (ticker in self.well_known_tickers and finbert_score > 0.3)):
+                self.confidence_classes['HIGH'].append(attribution_info)
+            elif finbert_score > 0.3 or entity_boost > 0.2:
+                self.confidence_classes['MEDIUM'].append(attribution_info)
+            else:
+                self.confidence_classes['LOW'].append(attribution_info)
         
         return has_context, min(1.0, confidence)
     
@@ -537,7 +524,7 @@ class RedditDataProcessor:
                     # For ambiguous tickers, require strong context and entity validation
                     try:
                         has_context, confidence = self._has_financial_context(text, ticker)
-                        has_entity, entity_boost, _ = self.entity_linker.validate_context(text, ticker)
+                        has_entity, entity_boost = self.entity_linker.validate_context(text, ticker)
                         if has_context and has_entity and confidence >= 0.8:
                             tickers.add(ticker)
                     except Exception as e:
@@ -548,7 +535,7 @@ class RedditDataProcessor:
                     # Regular ticker validation with entity check
                     try:
                         has_context, confidence = self._has_financial_context(text, ticker)
-                        has_entity, _, _ = self.entity_linker.validate_context(text, ticker)
+                        has_entity, entity_boost = self.entity_linker.validate_context(text, ticker)
                         if has_context and (has_entity or confidence >= 0.7):
                             tickers.add(ticker)
                     except Exception as e:
@@ -595,7 +582,7 @@ class RedditDataProcessor:
                 confidence = 0.5  # Standard base confidence
             
             # Get entity validation
-            has_entity, entity_boost, entity_matches = self.entity_linker.validate_context(text, ticker)
+            has_entity, entity_boost = self.entity_linker.validate_context(text, ticker)
             
             # Add entity match confidence
             if has_entity:
@@ -635,7 +622,7 @@ class RedditDataProcessor:
             max_confidence = max(max_confidence, min(confidence, 1.0))
         
         return max_confidence
-
+        
     def process_reddit_data(self, df):
         """Process raw Reddit data with enhanced features and debug logging."""
         try:
@@ -672,15 +659,13 @@ class RedditDataProcessor:
             with tqdm(total=len(processed_df), desc="Analyzing posts") as pbar:
                 potential_tickers_list = []
                 tickers_list = []
+                confidence_classes_list = []  # New list to store confidence classes
                 
                 for i in range(0, len(processed_df), batch_size):
                     batch = processed_df.iloc[i:i+batch_size]
                     
-                    # Extract potential tickers
-                    potential_tickers = batch['cleaned_text'].apply(
-                        lambda x: set(self.standalone_ticker_pattern.findall(x))
-                    )
-                    potential_tickers_list.extend(potential_tickers)
+                    # Reset confidence classes for this batch
+                    self.confidence_classes = {'HIGH': [], 'MEDIUM': [], 'LOW': []}
                     
                     # Extract and validate tickers
                     tickers = batch.apply(
@@ -692,10 +677,31 @@ class RedditDataProcessor:
                     )
                     tickers_list.extend(tickers)
                     
+                    # Store confidence classes for each post
+                    batch_classes = []
+                    for ticker_set in tickers:
+                        post_classes = set()
+                        for ticker in ticker_set:
+                            # Check which confidence class contains this ticker
+                            if any(entry['ticker'] == ticker for entry in self.confidence_classes['HIGH']):
+                                post_classes.add('HIGH')
+                            elif any(entry['ticker'] == ticker for entry in self.confidence_classes['MEDIUM']):
+                                post_classes.add('MEDIUM')
+                            else:
+                                post_classes.add('LOW')
+                        # Use highest confidence class for the post
+                        if 'HIGH' in post_classes:
+                            batch_classes.append('HIGH')
+                        elif 'MEDIUM' in post_classes:
+                            batch_classes.append('MEDIUM')
+                        else:
+                            batch_classes.append('LOW')
+                    
+                    confidence_classes_list.extend(batch_classes)
                     pbar.update(len(batch))
                 
-                processed_df['potential_tickers'] = potential_tickers_list
                 processed_df['tickers'] = tickers_list
+                processed_df['confidence_class'] = confidence_classes_list  # Add confidence classes to DataFrame
             
             # Step 4: Confidence Scoring
             print(f"\n{Fore.YELLOW}[4/{total_steps}] Calculating Confidence Scores{Style.RESET_ALL}")
@@ -874,14 +880,18 @@ class RedditDataProcessor:
         # Normalize Engagement Score
         df['engagement_score'] = (df['engagement_score'] - df['engagement_score'].mean()) / df['engagement_score'].std()
         
-        return df
+        return df 
     
     # -----------------------------------------------------------------------------------------------
     
     def _aggregate_daily_metrics(self, df):
         """Aggregate metrics by date for pipeline integration."""
+        # Ensure required columns exist
+        if 'is_relevant' not in df.columns:
+            df['is_relevant'] = df['ticker_confidence'].apply(lambda x: 1 if x >= 0.7 else 0)
+        
         # Group by date and calculate metrics
-        daily = df.groupby('date').agg({
+        metrics = {
             'overall_sentiment': ['mean', 'std', 'count'],
             'vader_sentiment': 'mean',
             'textblob_sentiment': 'mean',
@@ -890,7 +900,13 @@ class RedditDataProcessor:
             'score': 'sum',
             'num_comments': 'sum',
             'is_relevant': 'sum'  # Count of relevant posts per day
-        }).round(4)
+        }
+        
+        # Filter metrics based on available columns
+        available_metrics = {k: v for k, v in metrics.items() if k in df.columns}
+        
+        # Group by date and calculate metrics
+        daily = df.groupby('date').agg(available_metrics).round(4)
         
         # Flatten column names
         daily.columns = ['_'.join(col).strip() for col in daily.columns.values]

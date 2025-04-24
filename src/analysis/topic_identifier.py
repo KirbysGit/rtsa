@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 from tqdm import tqdm
 from colorama import Fore, Style, init
-from src.utils.path_config import RAW_DIR, DEBUG_DIR
+from src.utils.path_config import RAW_DIR, DEBUG_DIR, REFERENCES_DIR, VALID_TICKERS_FILE
 import requests
 import numpy as np
 from pathlib import Path
@@ -28,8 +28,20 @@ class TopicIdentifier:
     def __init__(self, data_dir=None):
         """Initialize the Topic Identifier."""
         print(f"\n{Fore.CYAN}Initializing Topic Identifier...{Style.RESET_ALL}")
-        self.data_dir = data_dir or DEBUG_DIR
+        self.data_dir = data_dir or REFERENCES_DIR  # Update to use references directory
         self.ticker_pattern = re.compile(r'\$([A-Z]{1,5})')
+        
+        # Set up ticker analysis directory
+        self.ticker_analysis_dir = RAW_DIR / "ticker_analysis"
+        self.ticker_analysis_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize tracking dictionaries
+        self.ticker_mentions = defaultdict(int)
+        self.ticker_engagement = defaultdict(float)
+        self.ticker_confidence = defaultdict(list)
+        self.ticker_contexts = defaultdict(list)
+        self.ticker_min_confidence = defaultdict(float)
+        self.ticker_max_confidence = defaultdict(float)
         
         # Common words to filter out
         self.common_words = {
@@ -57,37 +69,14 @@ class TopicIdentifier:
         
         print(f"{Fore.GREEN}✓ Topic Identifier initialized successfully{Style.RESET_ALL}\n")
     
-    def extract_tickers(self, text: str) -> List[str]:
-        """Extract ticker symbols from text with enhanced filtering."""
-        if pd.isna(text):
-            return []
-        
-        # Find $TICKER format
-        tickers = self.ticker_pattern.findall(text.upper())
-        
-        # Find standalone tickers (3-5 capital letters)
-        standalone = re.findall(r'\b[A-Z]{3,5}\b', text.upper())
-        tickers.extend(standalone)
-        
-        # Filter out common words and finance terms
-        tickers = [
-            t for t in tickers 
-            if t not in self.common_words 
-            and t not in self.finance_terms
-            and t in self.valid_tickers
-        ]
-        
-        return list(set(tickers))
-    
     def _load_valid_tickers(self) -> set:
         """Load valid stock tickers from NASDAQ and NYSE."""
         print(f"{Fore.CYAN}Loading valid tickers from exchanges...{Style.RESET_ALL}")
         try:
             # Try to load from local cache first
-            cache_file = self.data_dir / "valid_tickers.csv"
-            if cache_file.exists():
-                print(f"{Fore.YELLOW}Loading tickers from cache at {cache_file}...{Style.RESET_ALL}")
-                df = pd.read_csv(cache_file)
+            if VALID_TICKERS_FILE.exists():
+                print(f"{Fore.YELLOW}Loading tickers from cache at {VALID_TICKERS_FILE}...{Style.RESET_ALL}")
+                df = pd.read_csv(VALID_TICKERS_FILE)
                 tickers = set(df['Symbol'].str.upper().tolist())
                 print(f"{Fore.GREEN}✓ Loaded {len(tickers)} tickers from cache{Style.RESET_ALL}")
                 return tickers
@@ -110,10 +99,10 @@ class TopicIdentifier:
                     if len(symbol) <= 5 and symbol.isalpha():
                         tickers.add(symbol)
                 
-                # Save to cache in debug directory
-                self.data_dir.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame({'Symbol': list(tickers)}).to_csv(cache_file, index=False)
-                print(f"{Fore.GREEN}✓ Downloaded and cached {len(tickers)} tickers to {cache_file}{Style.RESET_ALL}")
+                # Save to cache in references directory
+                REFERENCES_DIR.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame({'Symbol': list(tickers)}).to_csv(VALID_TICKERS_FILE, index=False)
+                print(f"{Fore.GREEN}✓ Downloaded and cached {len(tickers)} tickers to {VALID_TICKERS_FILE}{Style.RESET_ALL}")
                 return tickers
             
             raise Exception("Failed to download ticker list")
@@ -131,12 +120,89 @@ class TopicIdentifier:
                 'ASML', 'QCOM', 'AVGO', 'TXN', 'MU', 'LRCX', 'AMAT', 'KLAC', 'ADI', 'MRVL'
             }
     
+    def extract_tickers(self, text: str) -> List[str]:
+        """Extract ticker symbols from text with enhanced filtering."""
+        if pd.isna(text):
+            return []
+        
+        # Find $TICKER format
+        tickers = self.ticker_pattern.findall(text.upper())
+        
+        # Find standalone tickers (3-5 capital letters)
+        standalone = re.findall(r'\b[A-Z]{3,5}\b', text.upper())
+        tickers.extend(standalone)
+        
+        # Filter out common words and finance terms
+        tickers = [
+            t for t in tickers 
+            if self._validate_ticker(t)
+        ]
+        
+        return list(set(tickers))
+    
+    def _load_latest_ticker_analysis(self, analysis_type="daily"):
+        """Load the most recent ticker analysis results."""
+        try:
+            analysis_files = list(self.ticker_analysis_dir.glob(f"ticker_analysis_{analysis_type}_*.csv"))
+            if not analysis_files:
+                return None
+            
+            # Get most recent file
+            latest_file = max(analysis_files, key=lambda x: x.stat().st_mtime)
+            
+            # Read CSV file
+            df = pd.read_csv(latest_file)
+            
+            # Verify data is from today
+            file_date = datetime.strptime(latest_file.stem.split('_')[-1], '%Y%m%d').date()
+            if file_date == datetime.now().date():
+                print(f"{Fore.GREEN}✓ Loaded ticker analysis from {latest_file.name}{Style.RESET_ALL}")
+                
+                # Convert to expected format for compatibility
+                return {
+                    'scores': dict(zip(df['ticker'], df['total_engagement'])),
+                    'mentions': dict(zip(df['ticker'], df['mentions'])),
+                    'sentiment': dict(zip(df['ticker'], df['avg_confidence'])),
+                    'debug_info': {
+                        ticker: {
+                            'mentions': row['mentions'],
+                            'engagement': row['total_engagement'],
+                            'avg_confidence': row['avg_confidence'],
+                            'sentiment_mean': row['avg_confidence'],
+                            'sentiment_std': 0,  # Not tracked in CSV format
+                            'confidence_classes': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}  # Not tracked in CSV format
+                        }
+                        for ticker, row in df.iterrows()
+                    }
+                }
+            else:
+                print(f"{Fore.YELLOW}Warning: Most recent ticker analysis is from {file_date}{Style.RESET_ALL}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error loading ticker analysis: {str(e)}")
+            return None
+    
+    def _validate_ticker(self, ticker: str) -> bool:
+        """Enhanced ticker validation."""
+        if not ticker or len(ticker) < 2:  # Prevent single-letter tickers
+            return False
+            
+        if ticker in self.common_words or ticker in self.finance_terms:
+            return False
+            
+        if ticker in POTENTIALLY_AMBIGUOUS_TICKERS and len(ticker) < 3:
+            return False
+            
+        return ticker in self.valid_tickers
+    
     def calculate_ticker_scores(self, df: pd.DataFrame) -> Dict[str, float]:
         """Calculate scores for each ticker based on mentions, engagement, and confidence class."""
         if df.empty:
             return {}
         
-        print(f"\n{Fore.CYAN}Analyzing posts for ticker mentions...{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}Pipeline Health Dashboard{Style.RESET_ALL}")
+        print(f"Posts: {len(df)} | Relevant: {sum(df['is_relevant'])} | Date Range: {df['date'].min()} to {df['date'].max()}")
         
         # Filter for relevant posts with ticker mentions
         relevant_df = df[df['is_relevant'] & df['tickers'].notna()]
@@ -144,162 +210,75 @@ class TopicIdentifier:
             print(f"{Fore.YELLOW}No relevant ticker mentions found{Style.RESET_ALL}")
             return {}
         
-        ticker_scores = {}
+        ticker_data = []
         ticker_mentions = Counter()
         ticker_engagement = Counter()
-        debug_info = defaultdict(lambda: {
-            'mentions': 0, 
-            'engagement': 0, 
-            'confidence': [],
-            'contexts': [],
-            'confidence_class_counts': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
-        })
+        ticker_confidence = defaultdict(list)
+        ticker_contexts = defaultdict(list)
         
         for _, row in tqdm(relevant_df.iterrows(), total=len(relevant_df), desc=f"{Fore.YELLOW}Processing posts{Style.RESET_ALL}"):
             for ticker in row['tickers']:
-                # Skip common words early
-                if ticker in self.common_words:
-                    continue
-                    
-                # Only consider tickers in our valid list
-                if ticker not in self.valid_tickers:
+                # Enhanced ticker validation
+                if not self._validate_ticker(ticker):
                     continue
                 
-                # Enhanced filtering for ambiguous tickers
-                if ticker in POTENTIALLY_AMBIGUOUS_TICKERS:
-                    confidence = row.get('ticker_confidence', 0)
-                    # Require higher confidence and entity match for ambiguous tickers
-                    if confidence < 0.9:
-                        continue
-                    
-                    # Track stats for ambiguous tickers
-                    self.ambiguous_stats[ticker]['total_mentions'] += 1
-                    if confidence >= 0.9:
-                        self.ambiguous_stats[ticker]['high_confidence_mentions'] += 1
-                    self.ambiguous_stats[ticker]['contexts'].append(row.get('cleaned_text', '')[:100])
-                    self.ambiguous_stats[ticker]['subreddits'].add(row.get('subreddit', ''))
-                
-                # Base score from mentions
+                # Track mentions and confidence
                 ticker_mentions[ticker] += 1
+                confidence = row.get('ticker_confidence', 0)
+                ticker_confidence[ticker].append(confidence)
+                
+                # Track contexts (limit to first 200 chars)
+                context = row.get('cleaned_text', '')[:200]
+                if context and context not in ticker_contexts[ticker]:
+                    ticker_contexts[ticker].append(context)
                 
                 # Calculate weighted engagement based on confidence class
                 confidence_class = row.get('confidence_class', 'LOW')
-                class_multiplier = {'HIGH': 1.0, 'MEDIUM': 0.7, 'LOW': 0.4}.get(confidence_class, 0.4)
+                class_multiplier = {
+                    'HIGH': 1.5,    # Increased multiplier for HIGH confidence
+                    'MEDIUM': 1.0,  # Base multiplier for MEDIUM confidence
+                    'LOW': 0.5      # Reduced multiplier for LOW confidence
+                }.get(confidence_class, 0.5)
                 
                 engagement = (
                     row.get('score', 0) + 
                     row.get('num_comments', 0)
-                ) * row.get('ticker_confidence', 0.3) * class_multiplier
+                ) * confidence * class_multiplier
                 
                 ticker_engagement[ticker] += engagement
-                
-                # Store debug info
-                debug_info[ticker]['mentions'] += 1
-                debug_info[ticker]['engagement'] += engagement
-                debug_info[ticker]['confidence'].append(row.get('ticker_confidence', 0))
-                debug_info[ticker]['contexts'].append(row.get('cleaned_text', '')[:100])
-                debug_info[ticker]['confidence_class_counts'][confidence_class] += 1
-                
-                # Add to scores
-                ticker_scores[ticker] = ticker_scores.get(ticker, 0) + engagement
         
-        # Apply stricter post-processing filters
-        min_mentions = max(3, len(relevant_df) * 0.01)  # At least 3 mentions or 1% of posts
-        min_engagement = len(relevant_df) * 0.02  # At least 2% of total possible engagement
-        
-        filtered_scores = {
-            k: v 
-            for k, v in ticker_scores.items() 
-            if (ticker_mentions[k] >= min_mentions and ticker_engagement[k] >= min_engagement) and
-               (k not in POTENTIALLY_AMBIGUOUS_TICKERS or 
-                (ticker_mentions[k] >= min_mentions * 2 and  # Double the requirements for ambiguous tickers
-                 debug_info[k]['confidence_class_counts']['HIGH'] > 0))  # Require at least one HIGH confidence mention
-        }
-        
-        # Save enhanced debug information
-        self._save_debug_info(debug_info, filtered_scores, ticker_mentions, ticker_engagement)
-        
-        # Save ambiguous ticker analysis
-        self._save_ambiguous_analysis()
-        
-        # Normalize scores
-        if filtered_scores:
-            max_score = max(filtered_scores.values())
-            normalized_scores = {
-                k: v/max_score 
-                for k, v in filtered_scores.items()
-            }
+        # Prepare data for CSV
+        for ticker in ticker_mentions.keys():
+            confidences = ticker_confidence[ticker]
+            contexts = ticker_contexts[ticker]
             
-            print(f"{Fore.GREEN}✓ Identified {len(normalized_scores)} valid tickers{Style.RESET_ALL}")
-            
-            # Print top tickers with enhanced stats
-            print(f"\n{Fore.CYAN}Top Tickers Analysis:{Style.RESET_ALL}")
-            for ticker, score in sorted(normalized_scores.items(), key=lambda x: x[1], reverse=True)[:10]:
-                info = debug_info[ticker]
-                print(f"{Fore.GREEN}{ticker}:{Style.RESET_ALL}")
-                print(f"  Score: {score:.3f}")
-                print(f"  Mentions: {info['mentions']}")
-                print(f"  Confidence Classes:")
-                print(f"    HIGH: {info['confidence_class_counts']['HIGH']}")
-                print(f"    MEDIUM: {info['confidence_class_counts']['MEDIUM']}")
-                print(f"    LOW: {info['confidence_class_counts']['LOW']}")
-                print(f"  Avg Confidence: {np.mean(info['confidence']):.3f}")
-                print(f"  Total Engagement: {info['engagement']:.0f}")
-                if ticker in POTENTIALLY_AMBIGUOUS_TICKERS:
-                    print(f"  {Fore.YELLOW}⚠️ Ambiguous ticker - verified with entity matches{Style.RESET_ALL}")
-            
-            return normalized_scores
-        
-        print(f"{Fore.YELLOW}No tickers passed post-processing filters{Style.RESET_ALL}")
-        return {}
-    
-    def _save_debug_info(self, debug_info, filtered_scores, ticker_mentions, ticker_engagement):
-        """Save enhanced debug information about ticker processing."""
-        debug_rows = []
-        for ticker, info in debug_info.items():
-            debug_rows.append({
+            data = {
                 'ticker': ticker,
-                'mentions': info['mentions'],
-                'total_engagement': info['engagement'],
-                'avg_confidence': np.mean(info['confidence']),
-                'passed_filters': ticker in filtered_scores,
-                'is_common_word': ticker in self.common_words,
+                'mentions': ticker_mentions[ticker],
+                'total_engagement': ticker_engagement[ticker],
+                'avg_confidence': np.mean(confidences) if confidences else 0,
+                'passed_filters': True,  # Since we already filtered in _validate_ticker
+                'is_common_word': ticker.upper() in self.common_words,
                 'is_valid_ticker': ticker in self.valid_tickers,
-                'is_ambiguous': ticker in POTENTIALLY_AMBIGUOUS_TICKERS,
-                'example_contexts': '; '.join(info['contexts'][:3]),  # Save up to 3 example contexts
-                'min_confidence': min(info['confidence']),
-                'max_confidence': max(info['confidence'])
-            })
+                'is_ambiguous': ticker in POTENTIALLY_AMBIGUOUS_TICKERS,  # Direct check against the set
+                'example_contexts': '; '.join(contexts[:3]),  # Take up to 3 example contexts
+                'min_confidence': min(confidences) if confidences else 0,
+                'max_confidence': max(confidences) if confidences else 0
+            }
+            ticker_data.append(data)
         
-        if debug_rows:
-            debug_df = pd.DataFrame(debug_rows)
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            debug_file = self.data_dir / f"ticker_analysis_{timestamp}.csv"
-            debug_df.to_csv(debug_file, index=False)
-            print(f"{Fore.GREEN}✓ Saved ticker analysis to {debug_file}{Style.RESET_ALL}")
-
-    def _save_ambiguous_analysis(self):
-        """Save detailed analysis of ambiguous ticker mentions."""
-        if not self.ambiguous_stats:
-            return
-            
-        rows = []
-        for ticker, stats in self.ambiguous_stats.items():
-            rows.append({
-                'ticker': ticker,
-                'total_mentions': stats['total_mentions'],
-                'high_confidence_mentions': stats['high_confidence_mentions'],
-                'confidence_ratio': stats['high_confidence_mentions'] / stats['total_mentions'] if stats['total_mentions'] > 0 else 0,
-                'example_contexts': '; '.join(stats['contexts'][:3]),
-                'subreddits': '; '.join(stats['subreddits']),
-            })
+        # Convert to DataFrame and save as CSV
+        df_output = pd.DataFrame(ticker_data)
+        df_output = df_output.sort_values('total_engagement', ascending=False)
         
-        if rows:
-            df = pd.DataFrame(rows)
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            file_path = self.data_dir / f"ambiguous_tickers_{timestamp}.csv"
-            df.to_csv(file_path, index=False)
-            print(f"{Fore.GREEN}✓ Saved ambiguous ticker analysis to {file_path}{Style.RESET_ALL}")
+        # Save to CSV
+        timestamp = datetime.now().strftime('%Y%m%d')
+        csv_file = self.ticker_analysis_dir / f"ticker_analysis_daily_{timestamp}.csv"
+        df_output.to_csv(csv_file, index=False)
+        print(f"{Fore.GREEN}✓ Saved ticker analysis to {csv_file}{Style.RESET_ALL}")
+        
+        # Return scores for compatibility with existing code
+        return dict(zip(df_output['ticker'], df_output['total_engagement']))
     
     def identify_trending_topics(self, df: pd.DataFrame, min_mentions: int = 5) -> Dict[str, float]:
         """Identify trending tickers from processed Reddit posts."""
@@ -307,11 +286,21 @@ class TopicIdentifier:
             if df.empty:
                 return {}
             
+            # Try to load cached analysis first if df is None
+            if df is None:
+                cached_analysis = self._load_latest_ticker_analysis()
+                if cached_analysis:
+                    return cached_analysis['scores']
+            
             # Calculate ticker scores
             ticker_scores = self.calculate_ticker_scores(df)
             
             # Sort by score
-            trending = dict(sorted(ticker_scores.items(), key=lambda x: x[1], reverse=True))
+            trending = dict(sorted(
+                ticker_scores.items(), 
+                key=lambda x: x[1], 
+                reverse=True
+            ))
             
             print(f"\n{Fore.CYAN}Trending Analysis Complete:{Style.RESET_ALL}")
             print(f"{Fore.GREEN}✓ Identified {len(trending)} trending tickers{Style.RESET_ALL}")
@@ -321,10 +310,26 @@ class TopicIdentifier:
             print(f"{Fore.RED}✗ Error identifying trending topics: {str(e)}{Style.RESET_ALL}")
             return {}
     
-    def get_trending_tickers(self, df: pd.DataFrame, top_n: int = 10) -> List[str]:
-        """Get the top N trending tickers from processed data."""
-        trending = self.identify_trending_topics(df)
-        return list(trending.keys())[:top_n]
+    def get_trending_tickers(self, df: pd.DataFrame = None, top_n: int = 10) -> List[str]:
+        """Get the top N trending tickers from processed data or cache."""
+        # Try to get trending tickers from data or cache
+        if df is None:
+            cached_analysis = self._load_latest_ticker_analysis()
+            if cached_analysis:
+                trending = cached_analysis['scores']
+            else:
+                print(f"{Fore.RED}No cached ticker analysis found and no data provided{Style.RESET_ALL}")
+                return []
+        else:
+            trending = self.identify_trending_topics(df)
+        
+        # Filter and return top N valid tickers
+        valid_tickers = [
+            ticker for ticker in trending.keys()
+            if self._validate_ticker(ticker)
+        ]
+        
+        return valid_tickers[:top_n]
 
 def main():
     """Test the TopicIdentifier."""
