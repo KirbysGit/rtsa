@@ -9,13 +9,16 @@ from src.data_processing.reddit_data_processor import RedditDataProcessor, COMMO
 from src.utils.path_config import (
     RAW_DIR, 
     PROCESSED_DIR, 
-    TICKER_ANALYSIS_DIR,
+    TICKER_GENERAL_DIR,
     REDDIT_DATA_DIR,
     STOCK_DATA_DIR,
     PROCESSED_REDDIT_DIR
 )
 import pandas as pd
 from colorama import Fore, Style
+from src.modeling.feature_builder import FeatureBuilder
+from src.modeling.model_trainer import ModelTrainer
+from src.modeling.predictor import Predictor
 
 logger = logging.getLogger(__name__)
 
@@ -30,39 +33,75 @@ class PipelineOrchestrator:
         self.reddit_processor = RedditDataProcessor()
         self.topic_identifier = TopicIdentifier()
         self.stock_collector = StockDataCollector()
+        self.feature_builder = FeatureBuilder()
+        self.model_trainer = None  # Initialize later with config
+        self.predictor = None  # Initialize later if needed
         print(f"{Fore.GREEN}✓ All components initialized{Style.RESET_ALL}")
         
     def run_pipeline(self, 
                     top_n_tickers=5, 
                     days_to_analyze=7,
+                    lookback_window_days=60,
+                    reddit_lookback_days=30,
+                    reddit_posts_per_subreddit=100,
+                    min_rows_required=30,
+                    min_class_balance=0.1,
+                    verbose=False,
+                    summary_path=None,
                     pipeline_config={
-                        'collect_reddit_data': False,  # Collect new Reddit data
-                        'process_reddit_data': False,  # Process Reddit data
-                        'analyze_tickers': False,      # Run ticker analysis
-                        'collect_stock_data': True,    # Collect stock data
-                        'save_debug_info': True        # Save debug information
+                        'collect_reddit_data': False,
+                        'process_reddit_data': False,
+                        'analyze_tickers': False,
+                        'collect_stock_data': True,
+                        'save_debug_info': True,
+                        'generate_features': True,
+                        'train_models': True,
+                        'predict': True  # New config option
                     }):
-        """Run the pipeline with configurable steps."""
+        """Run the pipeline with configurable steps.
+        
+        Args:
+            top_n_tickers: Number of top trending tickers to analyze
+            days_to_analyze: Number of days of historical data to analyze
+            lookback_window_days: Number of days to look back for feature generation
+            reddit_lookback_days: Number of days to look back for Reddit posts
+            reddit_posts_per_subreddit: Number of posts to collect per subreddit/sort method
+            min_rows_required: Minimum rows required for model training
+            min_class_balance: Minimum class balance required for training
+            verbose: Whether to print detailed output
+            summary_path: Path to save training summary (CSV or JSON)
+            pipeline_config: Dictionary of pipeline step configurations
+        """
         try:
-            # Print The Current Pipeline Config.
+            # Print The Current Pipeline Config
             print(f"\n{Fore.CYAN}Pipeline Configuration:{Style.RESET_ALL}")
             for step, enabled in pipeline_config.items():
                 status = f"{Fore.GREEN}Enabled" if enabled else f"{Fore.YELLOW}Disabled"
                 print(f"• {step.replace('_', ' ').title()}: {status}{Style.RESET_ALL}")
             
-            # Initialize Variables.
+            if verbose:
+                print(f"\n{Fore.CYAN}Data Collection Parameters:{Style.RESET_ALL}")
+                print(f"• Reddit Lookback: {reddit_lookback_days} days")
+                print(f"• Posts per Subreddit: {reddit_posts_per_subreddit}")
+                print(f"• Feature Lookback: {lookback_window_days} days")
+                print(f"• Analysis Period: {days_to_analyze} days")
+            
+            # Initialize Variables
             reddit_data = None
             trending_tickers = None
             processed_df = None
-
+            
             # ------------------------------------------------------------------------------------------
             
             # Step 1: Data Collection.
             if pipeline_config['collect_reddit_data']:
                 print(f"\n{Fore.CYAN}Step 1: Reddit Data Collection{Style.RESET_ALL}")
                 
+                # Initialize collector with lookback period
+                self.reddit_collector = RedditDataCollector(max_days_lookback=reddit_lookback_days)
+                
                 # Collect Reddit Data.
-                reddit_data = self.reddit_collector.fetch_all_subreddits(limit=50)
+                reddit_data = self.reddit_collector.fetch_all_subreddits(limit=reddit_posts_per_subreddit)
                 
                 # Check if Reddit Data was Collected Successfully.
                 if reddit_data is None or reddit_data.empty:
@@ -164,8 +203,8 @@ class PipelineOrchestrator:
                 
                 # Save analysis to cache
                 timestamp = datetime.now().strftime('%Y%m%d')
-                cache_file = TICKER_ANALYSIS_DIR / f"ticker_analysis_daily_{timestamp}.csv"
-                TICKER_ANALYSIS_DIR.mkdir(parents=True, exist_ok=True)
+                cache_file = TICKER_GENERAL_DIR / f"ticker_analysis_daily_{timestamp}.csv"
+                TICKER_GENERAL_DIR.mkdir(parents=True, exist_ok=True)
                 
                 analysis_df = pd.DataFrame(analysis_metrics)
                 analysis_df.to_csv(cache_file, index=False)
@@ -214,7 +253,69 @@ class PipelineOrchestrator:
             
             # ------------------------------------------------------------------------------------------
             
-            # Final Summary.
+            # Step 5: Feature Generation
+            if pipeline_config['generate_features'] and trending_tickers:
+                print(f"\n{Fore.CYAN}Step 5: Feature Generation{Style.RESET_ALL}")
+                
+                # Generate features for trending tickers
+                feature_results = self.feature_builder.generate_features_for_tickers(
+                    tickers=trending_tickers,
+                    save_output=True,
+                    normalize=True
+                )
+                
+                # Print feature generation summary
+                print(f"\n{Fore.CYAN}Feature Generation Summary:{Style.RESET_ALL}")
+                for ticker, df in feature_results.items():
+                    if df is not None:
+                        print(f"{Fore.GREEN}✓ {ticker}: {len(df)} rows, {len(df.columns)} features{Style.RESET_ALL}")
+                    else:
+                        print(f"{Fore.RED}✗ {ticker}: Failed to generate features{Style.RESET_ALL}")
+            
+            # ------------------------------------------------------------------------------------------
+            
+            # Step 6: Model Training
+            if pipeline_config['train_models'] and trending_tickers:
+                print(f"\n{Fore.CYAN}Step 6: Model Training{Style.RESET_ALL}")
+                
+                # Initialize model trainer with configuration
+                self.model_trainer = ModelTrainer(
+                    model_type='xgboost',
+                    lookback_window_days=lookback_window_days,
+                    min_rows_required=min_rows_required,
+                    min_class_balance=min_class_balance,
+                    verbose=verbose,
+                    summary_path=summary_path
+                )
+                
+                # Train models for trending tickers
+                for ticker in trending_tickers:
+                    self.model_trainer.train_and_evaluate(ticker, save_results=True)
+                
+                # Print final training summary
+                print(self.model_trainer.get_training_summary())
+                self.model_trainer.save_training_summary()
+            
+            # ------------------------------------------------------------------------------------------
+            
+            # Step 7: Predictions
+            if pipeline_config['predict'] and trending_tickers:
+                print(f"\n{Fore.CYAN}Step 7: Running Predictions{Style.RESET_ALL}")
+                
+                # Initialize predictor
+                self.predictor = Predictor(confidence_threshold=0.6)
+                
+                # Run predictions and get summary
+                prediction_summary = self.predictor.predict_all(trending_tickers)
+                
+                if not prediction_summary.empty:
+                    print(f"\n{Fore.GREEN}✓ Generated predictions for {len(prediction_summary)} tickers{Style.RESET_ALL}")
+                else:
+                    print(f"\n{Fore.YELLOW}No predictions could be generated{Style.RESET_ALL}")
+            
+            # ------------------------------------------------------------------------------------------
+            
+            # Final Summary
             print(f"\n{Fore.GREEN}Pipeline completed successfully{Style.RESET_ALL}")
             
         except Exception as e:
@@ -351,7 +452,7 @@ class PipelineOrchestrator:
     def _load_cached_ticker_analysis(self):
         """Load the most recent ticker analysis from CSV."""
         try:
-            analysis_files = list(TICKER_ANALYSIS_DIR.glob("ticker_analysis_daily_*.csv"))
+            analysis_files = list(TICKER_GENERAL_DIR.glob("ticker_analysis_daily_*.csv"))
             if not analysis_files:
                 logger.error("No cached ticker analysis found")
                 return None
@@ -388,24 +489,48 @@ class PipelineOrchestrator:
 
 def main():
     """Main function to run the pipeline."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Run the Reddit Stock Trend Analysis Pipeline')
+    parser.add_argument('--tickers', type=str, help='Path to file containing tickers (one per line)')
+    parser.add_argument('--days', type=int, default=7, help='Number of days to analyze')
+    parser.add_argument('--lookback', type=int, default=60, help='Lookback window for features')
+    parser.add_argument('--reddit-days', type=int, default=30, help='Days to look back for Reddit posts')
+    parser.add_argument('--reddit-limit', type=int, default=100, help='Posts per subreddit/sort method')
+    parser.add_argument('--min-rows', type=int, default=30, help='Minimum rows for training')
+    parser.add_argument('--min-balance', type=float, default=0.1, help='Minimum class balance')
+    parser.add_argument('--verbose', action='store_true', help='Print detailed output')
+    parser.add_argument('--summary', type=str, help='Path to save training summary')
+    
+    args = parser.parse_args()
+    
     # Set up logging
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
     )
     
-    # Initialize and run pipeline with configuration
+    # Initialize and run pipeline
     orchestrator = PipelineOrchestrator()
     orchestrator.run_pipeline(
         top_n_tickers=5,
-        days_to_analyze=7,
+        days_to_analyze=args.days,
+        lookback_window_days=args.lookback,
+        reddit_lookback_days=args.reddit_days,
+        reddit_posts_per_subreddit=args.reddit_limit,
+        min_rows_required=args.min_rows,
+        min_class_balance=args.min_balance,
+        verbose=args.verbose,
+        summary_path=args.summary,
         pipeline_config={
-            'collect_reddit_data': False,  # Use existing data
-            'process_reddit_data': False,   # Process the data
-            'analyze_tickers': False,       # Run ticker analysis
-            'collect_stock_data': True,    # Collect stock data
-            'save_debug_info': False        # Save debug information
+            'collect_reddit_data': False,  # Hardcoded to always collect new data
+            'process_reddit_data': False,
+            'analyze_tickers': False,
+            'collect_stock_data': False,
+            'save_debug_info': False,
+            'generate_features': False,
+            'train_models': True,
+            'predict': True  # Hardcoded to always run predictions
         }
     )
 

@@ -16,9 +16,14 @@ PROCESSED_DIR = DATA_DIR / "processed"
 MERGED_DIR = DATA_DIR / "merged"
 DEBUG_DIR = DATA_DIR / "debug"
 REFERENCES_DIR = DATA_DIR / "references"
+MODEL_DIR = DATA_DIR / "models"
+
+# Ticker data directories (new)
+TICKERS_DIR = DATA_DIR / "tickers"
+TICKER_GENERAL_DIR = TICKERS_DIR / "ticker_general"
+TICKER_SENTIMENT_DIR = TICKERS_DIR / "ticker_sentiment"
 
 # Raw data subdirectories
-TICKER_ANALYSIS_DIR = RAW_DIR / "ticker_analysis"
 REDDIT_DATA_DIR = RAW_DIR / "reddit_data"
 STOCK_DATA_DIR = RAW_DIR / "stock_data"
 
@@ -39,8 +44,11 @@ ENTITY_CACHE_FILE = REFERENCES_DIR / "entity_cache.json"
 # Directory structure with descriptions
 DIRECTORY_STRUCTURE = {
     'data': {
+        'tickers': {
+            'ticker_general': 'Stores general ticker analysis data',
+            'ticker_sentiment': 'Stores ticker-specific sentiment analysis'
+        },
         'raw': {
-            'ticker_analysis': 'Stores daily ticker analysis results',
             'reddit_data': 'Raw Reddit post data',
             'stock_data': 'Raw stock price data'
         },
@@ -66,13 +74,16 @@ _REQUIRED_DIRECTORIES = [
     MERGED_DIR,
     DEBUG_DIR,
     RESULTS_DIR,
-    TICKER_ANALYSIS_DIR,
     REDDIT_DATA_DIR,
     STOCK_DATA_DIR,
     PROCESSED_REDDIT_DIR,
     PROCESSED_STOCK_DIR,
     REPORTS_DIR,
-    REFERENCES_DIR
+    REFERENCES_DIR,
+    TICKERS_DIR,
+    TICKER_GENERAL_DIR,
+    TICKER_SENTIMENT_DIR,
+    MODEL_DIR
 ]
 
 def _ensure_directories_exist():

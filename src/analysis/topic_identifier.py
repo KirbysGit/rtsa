@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple
 from tqdm import tqdm
 from colorama import Fore, Style, init
-from src.utils.path_config import RAW_DIR, DEBUG_DIR, REFERENCES_DIR, VALID_TICKERS_FILE
+from src.utils.path_config import RAW_DIR, DEBUG_DIR, REFERENCES_DIR, VALID_TICKERS_FILE, PROCESSED_REDDIT_DIR
 import requests
 import numpy as np
 from pathlib import Path
@@ -249,6 +249,19 @@ class TopicIdentifier:
         
         # Prepare data for CSV
         for ticker in ticker_mentions.keys():
+            # Skip tickers with only 1 mention
+            if ticker_mentions[ticker] < 2:
+                logger.warning(f"Ticker {ticker} excluded: only {ticker_mentions[ticker]} mention(s)")
+                continue
+                
+            # Check for sentiment files
+            daily_file = Path(PROCESSED_REDDIT_DIR) / f"{ticker}_daily_sentiment.csv"
+            detailed_file = Path(PROCESSED_REDDIT_DIR) / f"{ticker}_detailed_sentiment.csv"
+            
+            if not (daily_file.exists() or detailed_file.exists()):
+                logger.warning(f"Ticker {ticker} excluded: no sentiment files found")
+                continue
+            
             confidences = ticker_confidence[ticker]
             contexts = ticker_contexts[ticker]
             
@@ -269,6 +282,10 @@ class TopicIdentifier:
         
         # Convert to DataFrame and save as CSV
         df_output = pd.DataFrame(ticker_data)
+        if df_output.empty:
+            logger.warning("No tickers met the minimum requirements for trending analysis")
+            return {}
+            
         df_output = df_output.sort_values('total_engagement', ascending=False)
         
         # Save to CSV
@@ -280,7 +297,7 @@ class TopicIdentifier:
         # Return scores for compatibility with existing code
         return dict(zip(df_output['ticker'], df_output['total_engagement']))
     
-    def identify_trending_topics(self, df: pd.DataFrame, min_mentions: int = 5) -> Dict[str, float]:
+    def identify_trending_topics(self, df: pd.DataFrame, min_mentions: int = 2) -> Dict[str, float]:
         """Identify trending tickers from processed Reddit posts."""
         try:
             if df.empty:
@@ -295,15 +312,27 @@ class TopicIdentifier:
             # Calculate ticker scores
             ticker_scores = self.calculate_ticker_scores(df)
             
+            # Filter out tickers with low mentions or missing sentiment
+            filtered_scores = {}
+            for ticker, score in ticker_scores.items():
+                # Check for sentiment files
+                daily_file = Path(PROCESSED_REDDIT_DIR) / f"{ticker}_daily_sentiment.csv"
+                detailed_file = Path(PROCESSED_REDDIT_DIR) / f"{ticker}_detailed_sentiment.csv"
+                
+                if daily_file.exists() or detailed_file.exists():
+                    filtered_scores[ticker] = score
+                else:
+                    logger.warning(f"Ticker {ticker} excluded from trending: no sentiment files found")
+            
             # Sort by score
             trending = dict(sorted(
-                ticker_scores.items(), 
+                filtered_scores.items(), 
                 key=lambda x: x[1], 
                 reverse=True
             ))
             
             print(f"\n{Fore.CYAN}Trending Analysis Complete:{Style.RESET_ALL}")
-            print(f"{Fore.GREEN}✓ Identified {len(trending)} trending tickers{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}✓ Identified {len(trending)} trending tickers with sentiment data{Style.RESET_ALL}")
             return trending
             
         except Exception as e:
@@ -311,7 +340,7 @@ class TopicIdentifier:
             return {}
     
     def get_trending_tickers(self, df: pd.DataFrame = None, top_n: int = 10) -> List[str]:
-        """Get the top N trending tickers from processed data or cache."""
+        """Get the top N trending tickers from processed data or cache, ensuring they have sentiment files."""
         # Try to get trending tickers from data or cache
         if df is None:
             cached_analysis = self._load_latest_ticker_analysis()
@@ -323,13 +352,35 @@ class TopicIdentifier:
         else:
             trending = self.identify_trending_topics(df)
         
-        # Filter and return top N valid tickers
-        valid_tickers = [
-            ticker for ticker in trending.keys()
-            if self._validate_ticker(ticker)
-        ]
+        # Filter tickers based on sentiment file existence and validity
+        valid_tickers = []
+        for ticker in trending.keys():
+            if not self._validate_ticker(ticker):
+                continue
+                
+            # Check for sentiment files
+            daily_file = Path(PROCESSED_REDDIT_DIR) / f"{ticker}_daily_sentiment.csv"
+            detailed_file = Path(PROCESSED_REDDIT_DIR) / f"{ticker}_detailed_sentiment.csv"
+            
+            if daily_file.exists() or detailed_file.exists():
+                valid_tickers.append(ticker)
+            else:
+                logger.warning(f"Ticker {ticker} excluded from trending: no sentiment files found")
         
-        return valid_tickers[:top_n]
+        # Sort by engagement score and return top N
+        sorted_tickers = sorted(
+            valid_tickers,
+            key=lambda t: trending[t],
+            reverse=True
+        )
+        
+        selected_tickers = sorted_tickers[:top_n]
+        if selected_tickers:
+            print(f"\n{Fore.GREEN}Selected {len(selected_tickers)} trending tickers with sentiment data{Style.RESET_ALL}")
+        else:
+            print(f"\n{Fore.YELLOW}No trending tickers found with sentiment data{Style.RESET_ALL}")
+        
+        return selected_tickers
 
 def main():
     """Test the TopicIdentifier."""

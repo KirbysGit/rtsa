@@ -14,7 +14,12 @@ from textblob import TextBlob
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
-from src.utils.path_config import RAW_DIR, PROCESSED_DIR, DEBUG_DIR
+from src.utils.path_config import (
+    RAW_DIR, 
+    PROCESSED_DIR, 
+    DEBUG_DIR, 
+    TICKER_SENTIMENT_DIR
+)
 from src.analysis.topic_identifier import POTENTIALLY_AMBIGUOUS_TICKERS  # Added import
 from typing import Tuple, List, Set
 from colorama import Fore, Style, init
@@ -23,6 +28,7 @@ import time
 from src.analysis.entity_linker import EntityLinker
 import json
 from contextlib import nullcontext
+from collections import defaultdict
 
 # Initialize colorama
 init()
@@ -623,11 +629,73 @@ class RedditDataProcessor:
         
         return max_confidence
         
+    def _save_per_ticker_sentiment_files(self, processed_df: pd.DataFrame, ticker_sentiment_df: pd.DataFrame) -> Set[str]:
+        """Save detailed and daily sentiment files for each ticker that has sufficient mentions.
+        Returns a set of valid tickers that have sentiment data.
+        
+        Args:
+            processed_df: DataFrame containing processed Reddit posts with ticker mentions
+            ticker_sentiment_df: DataFrame containing aggregated ticker-level sentiment metrics
+        """
+        valid_tickers = set()
+        try:
+            # Get tickers with at least 2 mentions and non-zero sentiment data
+            potential_tickers = ticker_sentiment_df[
+                (ticker_sentiment_df['total_mentions'] >= 2) & 
+                (ticker_sentiment_df['avg_sentiment'].notna()) &
+                (ticker_sentiment_df['avg_sentiment'] != 0)
+            ]['ticker'].unique()
+            
+            print(f"\n{Fore.CYAN}Saving Per-Ticker Sentiment Files:{Style.RESET_ALL}")
+            print(f"Found {len(potential_tickers)} tickers with ≥2 mentions and sentiment data")
+            
+            for ticker in tqdm(potential_tickers, desc="Processing tickers"):
+                try:
+                    # Get all posts mentioning this ticker
+                    ticker_posts = processed_df[processed_df['tickers'].apply(lambda x: ticker in x)].copy()
+                    
+                    if not ticker_posts.empty:
+                        # Ensure date columns are timezone naive before saving
+                        if 'date' in ticker_posts.columns:
+                            ticker_posts['date'] = pd.to_datetime(ticker_posts['date']).dt.tz_localize(None)
+                        if 'created_utc' in ticker_posts.columns:
+                            ticker_posts['created_utc'] = pd.to_datetime(ticker_posts['created_utc']).dt.tz_localize(None)
+                        
+                        # Save detailed sentiment file
+                        detailed_file = self.processed_path / f"{ticker}_detailed_sentiment.csv"
+                        ticker_posts.to_csv(detailed_file, index=False)
+                        
+                        # Calculate daily metrics for this ticker
+                        daily_metrics = self._aggregate_daily_metrics(ticker_posts)
+                        
+                        # Ensure daily metrics dates are timezone naive
+                        if 'Date' in daily_metrics.columns:
+                            daily_metrics['Date'] = pd.to_datetime(daily_metrics['Date']).dt.tz_localize(None)
+                        
+                        # Save daily sentiment file
+                        daily_file = self.processed_path / f"{ticker}_daily_sentiment.csv"
+                        daily_metrics.to_csv(daily_file, index=False)
+                        
+                        # Add to valid tickers set since we successfully created sentiment files
+                        valid_tickers.add(ticker)
+                        
+                except Exception as e:
+                    logger.error(f"Error processing ticker {ticker}: {str(e)}")
+                    continue
+            
+            print(f"\n{Fore.GREEN}✓ Saved per-ticker sentiment files to {self.processed_path}{Style.RESET_ALL}")
+            print(f"Successfully processed {len(valid_tickers)} tickers with sentiment data")
+            
+        except Exception as e:
+            logger.error(f"Error saving per-ticker sentiment files: {str(e)}")
+        
+        return valid_tickers
+        
     def process_reddit_data(self, df):
         """Process raw Reddit data with enhanced features and debug logging."""
         try:
             print(f"\n{Fore.CYAN}Processing Reddit Data Pipeline{Style.RESET_ALL}")
-            total_steps = 6
+            total_steps = 8  # Updated to include per-ticker file generation
             
             # Step 1: Initial Processing
             print(f"\n{Fore.YELLOW}[1/{total_steps}] Initial Data Processing{Style.RESET_ALL}")
@@ -727,7 +795,8 @@ class RedditDataProcessor:
             
             # Step 6: Final Processing
             print(f"\n{Fore.YELLOW}[6/{total_steps}] Finalizing Results{Style.RESET_ALL}")
-            processed_df['date'] = pd.to_datetime(processed_df['created_utc']).dt.date
+            # Convert to datetime and ensure timezone naive
+            processed_df['date'] = pd.to_datetime(processed_df['created_utc']).dt.tz_localize(None)
             daily_metrics = self._aggregate_daily_metrics(processed_df)
             
             # Save entity matching debug info
@@ -777,7 +846,119 @@ class RedditDataProcessor:
             print(f"  • Generated {len(daily_metrics)} daily records")
             print(f"  • Found {processed_df['tickers'].apply(len).sum()} ticker mentions")
             
-            return processed_df, daily_metrics
+            # Step 7: Ticker-Level Sentiment Aggregation
+            print(f"\n{Fore.YELLOW}[7/{total_steps}] Aggregating Ticker-Level Sentiment{Style.RESET_ALL}")
+            
+            # Initialize defaultdict for ticker statistics
+            ticker_stats = defaultdict(lambda: {
+                'sentiments': [],
+                'confidences': [],
+                'comment_sentiments': [],
+                'engagements': [],
+                'mentions': 0,
+                'confidence_class': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
+                'contexts': [],
+                'dates': []
+            })
+            
+            # Process each row and aggregate by ticker
+            with tqdm(total=len(processed_df), desc="Aggregating ticker data") as pbar:
+                for _, row in processed_df.iterrows():
+                    date = row['date']
+                    for ticker in row['tickers']:
+                        # Core sentiment metrics
+                        sentiment = row.get('overall_sentiment', 0)
+                        if pd.notna(sentiment) and sentiment != 0:  # Only include non-zero sentiment
+                            ticker_stats[ticker]['sentiments'].append(sentiment)
+                            ticker_stats[ticker]['confidences'].append(row.get('ticker_confidence', 0))
+                            ticker_stats[ticker]['engagements'].append(row.get('engagement_score', 0))
+                            
+                            comment_sentiment = row.get('comment_sentiment', 0)
+                            if pd.notna(comment_sentiment) and comment_sentiment != 0:
+                                ticker_stats[ticker]['comment_sentiments'].append(comment_sentiment)
+                            
+                            # Increment confidence class counter
+                            ticker_stats[ticker]['confidence_class'][row.get('confidence_class', 'LOW')] += 1
+                            
+                            # Track mention count
+                            ticker_stats[ticker]['mentions'] += 1
+                            
+                            # Store context for analysis (limit to 3 examples per ticker)
+                            if len(ticker_stats[ticker]['contexts']) < 3:
+                                context = row.get('cleaned_text', '')[:200]  # Limit context length
+                                if context and context not in ticker_stats[ticker]['contexts']:
+                                    ticker_stats[ticker]['contexts'].append(context)
+                            
+                            # Track dates for time series
+                            ticker_stats[ticker]['dates'].append(date)
+                    pbar.update(1)
+            
+            # Convert to DataFrame
+            ticker_records = []
+            for ticker, data in ticker_stats.items():
+                # Only include tickers with multiple mentions and sentiment data
+                if data['mentions'] >= 2 and len(data['sentiments']) > 0:
+                    record = {
+                        'ticker': ticker,
+                        'avg_sentiment': np.mean(data['sentiments']),
+                        'sentiment_std': np.std(data['sentiments']) if len(data['sentiments']) > 1 else 0,
+                        'avg_confidence': np.mean(data['confidences']),
+                        'avg_comment_sentiment': np.mean([s for s in data['comment_sentiments'] if s != 0]),
+                        'total_engagement': np.sum(data['engagements']),
+                        'total_mentions': data['mentions'],
+                        'high_confidence_mentions': data['confidence_class']['HIGH'],
+                        'medium_confidence_mentions': data['confidence_class']['MEDIUM'],
+                        'low_confidence_mentions': data['confidence_class']['LOW'],
+                        'example_contexts': '; '.join(data['contexts']),
+                        'first_mention_date': min(data['dates']),
+                        'last_mention_date': max(data['dates']),
+                        'days_mentioned': len(set(data['dates']))
+                    }
+                    
+                    # Add confidence distribution metrics
+                    total_mentions = sum(data['confidence_class'].values())
+                    record.update({
+                        'pct_high_confidence': data['confidence_class']['HIGH'] / total_mentions if total_mentions > 0 else 0,
+                        'pct_medium_confidence': data['confidence_class']['MEDIUM'] / total_mentions if total_mentions > 0 else 0,
+                        'pct_low_confidence': data['confidence_class']['LOW'] / total_mentions if total_mentions > 0 else 0
+                    })
+                    
+                    ticker_records.append(record)
+            
+            # Create DataFrame and sort by total engagement
+            ticker_sentiment_df = pd.DataFrame(ticker_records)
+            if not ticker_sentiment_df.empty:
+                ticker_sentiment_df = ticker_sentiment_df.sort_values('total_engagement', ascending=False)
+                
+                # Save ticker-level sentiment data
+                timestamp = datetime.now().strftime('%Y%m%d')
+                sentiment_file = TICKER_SENTIMENT_DIR / f"ticker_sentiment_{timestamp}.csv"
+                ticker_sentiment_df.to_csv(sentiment_file, index=False)
+                
+                print(f"\n{Fore.GREEN}Ticker Sentiment Analysis Summary:{Style.RESET_ALL}")
+                print(f"• Total unique tickers analyzed: {len(ticker_sentiment_df)}")
+                print(f"• Top tickers by engagement:")
+                for _, row in ticker_sentiment_df.head().iterrows():
+                    sentiment_icon = "📈" if row['avg_sentiment'] > 0.2 else "📉" if row['avg_sentiment'] < -0.2 else "➖"
+                    print(f"  {row['ticker']:<5} {sentiment_icon} Mentions: {row['total_mentions']:>3} | "
+                          f"Sentiment: {row['avg_sentiment']:>6.2f} | "
+                          f"High Conf: {row['pct_high_confidence']:>5.1%}")
+                
+                print(f"\n{Fore.GREEN}✓ Saved ticker-level sentiment data to {sentiment_file}{Style.RESET_ALL}")
+                
+                # Step 8: Generate Per-Ticker Sentiment Files
+                print(f"\n{Fore.YELLOW}[8/{total_steps}] Generating Per-Ticker Sentiment Files{Style.RESET_ALL}")
+                valid_tickers = self._save_per_ticker_sentiment_files(processed_df, ticker_sentiment_df)
+                
+                # Update processed_df to only include valid tickers
+                processed_df['tickers'] = processed_df['tickers'].apply(
+                    lambda x: {ticker for ticker in x if ticker in valid_tickers}
+                )
+                
+                return processed_df, daily_metrics
+            else:
+                print(f"\n{Fore.YELLOW}No tickers found with sufficient mentions and sentiment data{Style.RESET_ALL}")
+                return None, None
             
         except Exception as e:
             logger.error(f"Error Processing Reddit Data: {str(e)}")
@@ -890,6 +1071,12 @@ class RedditDataProcessor:
         if 'is_relevant' not in df.columns:
             df['is_relevant'] = df['ticker_confidence'].apply(lambda x: 1 if x >= 0.7 else 0)
         
+        # Convert date column to datetime if it exists
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+        elif 'created_utc' in df.columns:
+            df['date'] = pd.to_datetime(df['created_utc']).dt.tz_localize(None)
+        
         # Group by date and calculate metrics
         metrics = {
             'overall_sentiment': ['mean', 'std', 'count'],
@@ -911,12 +1098,12 @@ class RedditDataProcessor:
         # Flatten column names
         daily.columns = ['_'.join(col).strip() for col in daily.columns.values]
         
-        # Reset index and rename date column
+        # Reset index and rename date column to standardize
         daily.reset_index(inplace=True)
         daily.rename(columns={'date': 'Date'}, inplace=True)
         
-        # Convert Date to datetime
-        daily['Date'] = pd.to_datetime(daily['Date'])
+        # Ensure Date column is timezone naive datetime
+        daily['Date'] = pd.to_datetime(daily['Date']).dt.tz_localize(None)
         
         return daily
 
