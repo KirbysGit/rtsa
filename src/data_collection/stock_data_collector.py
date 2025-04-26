@@ -13,6 +13,7 @@ from typing import Optional, Dict, List
 from datetime import datetime, timedelta
 from src.utils.path_config import RAW_DIR
 import os
+from src.utils.figure_generator import FigureGenerator
 
 # Setup Logging.
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class StockDataCollector:
         """Initialize the Stock Data Collector."""
         self.data_dir = data_dir or (RAW_DIR / "stock_data")
         os.makedirs(self.data_dir, exist_ok=True)
+        self.figure_generator = FigureGenerator()
     
     # -----------------------------------------------------------------------------------------------
 
@@ -209,6 +211,42 @@ class StockDataCollector:
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
+    def visualize_stock_data(self, tickers: List[str], start_date: str, end_date: str, 
+                           sentiment_data: Optional[Dict[str, pd.DataFrame]] = None) -> None:
+        """
+        Generate technical analysis visualizations for specified tickers.
+        
+        Args:
+            tickers: List of ticker symbols to visualize
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            sentiment_data: Optional dictionary of sentiment DataFrames keyed by ticker
+        """
+        stock_data_dict = {}
+        logger.info(f"Starting visualization for tickers: {tickers}")
+        logger.info(f"Date range: {start_date} to {end_date}")
+        
+        for ticker in tickers:
+            logger.info(f"Fetching data for {ticker}...")
+            df = self.fetch_stock_data(ticker, start_date, end_date)
+            if df is not None:
+                logger.info(f"Data shape for {ticker}: {df.shape}")
+                logger.info(f"Columns: {df.columns.tolist()}")
+                stock_data_dict[ticker] = df
+                logger.info(f"Prepared visualization data for {ticker}")
+            else:
+                logger.warning(f"Could not prepare visualization data for {ticker}")
+        
+        if stock_data_dict:
+            logger.info(f"Generating plots for {len(stock_data_dict)} tickers...")
+            try:
+                self.figure_generator.generate_multi_ticker_analysis(stock_data_dict, sentiment_data)
+                logger.info(f"Generated technical analysis plots for {len(stock_data_dict)} tickers")
+            except Exception as e:
+                logger.error(f"Error generating plots: {str(e)}", exc_info=True)
+        else:
+            logger.warning("No data available for visualization")
+
 # -----------------------------------------------------------------------------------------------
 
 def main():
@@ -223,21 +261,16 @@ def main():
     # Initialize collector
     collector = StockDataCollector()
     
-    # Test with NVDA
+    # Test with multiple tickers
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=7)
+    start_date = end_date - timedelta(days=30)  # Increased to 30 days for better visualization
     
-    df = collector.fetch_stock_data(
-        ticker='NVDA',
+    test_tickers = ['NVDA', 'TSLA']
+    collector.visualize_stock_data(
+        tickers=test_tickers,
         start_date=start_date.strftime('%Y-%m-%d'),
         end_date=end_date.strftime('%Y-%m-%d')
     )
-    
-    if df is not None:
-        print(f"Collected {len(df)} days of data for NVDA")
-        print(f"Date range: {df['Date'].min()} to {df['Date'].max()}")
-    else:
-        print("No data was collected.")
 
 if __name__ == "__main__":
     main() 

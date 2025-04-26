@@ -22,6 +22,7 @@ from sklearn.metrics import (
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
 from colorama import Fore, Style
+from src.utils.figure_generator import FigureGenerator
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -283,6 +284,28 @@ class ModelTrainer:
         except Exception as e:
             logger.error(f"Failed to save model results for {ticker}: {str(e)}")
     
+    def generate_performance_visualizations(self) -> None:
+        """Generate visualizations of model performance across tickers."""
+        if not self.training_summary:
+            logger.warning("No training results available for visualization")
+            return
+        
+        try:
+            # Initialize figure generator
+            fig_gen = FigureGenerator()
+            
+            # Generate performance charts for different metrics
+            for metric in ['roc_auc', 'accuracy', 'f1']:
+                fig_gen.generate_model_performance_chart(
+                    self.training_summary,
+                    metric=metric
+                )
+            
+            logger.info("Generated model performance visualizations")
+            
+        except Exception as e:
+            logger.error(f"Error generating performance visualizations: {str(e)}")
+    
     def train_and_evaluate(self, ticker: str, save_results: bool = True) -> Dict:
         """Train and evaluate a model with streamlined output."""
         try:
@@ -378,6 +401,11 @@ class ModelTrainer:
             }
             
             self.training_summary[ticker] = result
+            
+            # Generate performance visualizations if we have results for multiple tickers
+            if len(self.training_summary) > 1:
+                self.generate_performance_visualizations()
+            
             return result
             
         except Exception as e:
@@ -497,6 +525,9 @@ def main():
     # Train models
     for ticker in test_tickers:
         trainer.train_and_evaluate(ticker, save_results=True)
+    
+    # Generate final visualizations
+    trainer.generate_performance_visualizations()
     
     # Print and save summary
     print(trainer.get_training_summary())

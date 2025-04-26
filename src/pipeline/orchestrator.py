@@ -524,11 +524,11 @@ def main():
         summary_path=args.summary,
         pipeline_config={
             'collect_reddit_data': False,  # Hardcoded to always collect new data
-            'process_reddit_data': False,
-            'analyze_tickers': False,
-            'collect_stock_data': False,
-            'save_debug_info': False,
-            'generate_features': False,
+            'process_reddit_data': True,
+            'analyze_tickers': True,
+            'collect_stock_data': True,
+            'save_debug_info': True,
+            'generate_features': True,
             'train_models': True,
             'predict': True  # Hardcoded to always run predictions
         }

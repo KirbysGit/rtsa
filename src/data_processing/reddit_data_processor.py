@@ -29,6 +29,7 @@ from src.analysis.entity_linker import EntityLinker
 import json
 from contextlib import nullcontext
 from collections import defaultdict
+from src.utils.figure_generator import FigureGenerator
 
 # Initialize colorama
 init()
@@ -246,6 +247,14 @@ class RedditDataProcessor:
                 'min_confidence': 0.9
             }
         }
+        
+        # Initialize figure generator
+        self.figure_generator = FigureGenerator()
+        
+        # Add rejection reasons tracking
+        self.rejection_reasons = defaultdict(int)
+        
+        print(f"{Fore.GREEN}✓ Reddit Data Processor initialized{Style.RESET_ALL}")
     
     def _get_context_window(self, text: str, target: str, window_size: int = 20) -> str:
         """Get a window of words around a target word."""
@@ -465,12 +474,14 @@ class RedditDataProcessor:
             for ticker in dollar_tickers:
                 # Skip if in negative context
                 if self._has_negative_context(text, ticker):
+                    self.rejection_reasons['negative_context'] += 1
                     continue
                     
                 # Extra validation for ambiguous financial tickers
                 if ticker in self.ambiguous_financial_tickers:
                     is_valid, _ = self._validate_ambiguous_financial_ticker(text, ticker)
                     if not is_valid:
+                        self.rejection_reasons['ambiguous_ticker'] += 1
                         continue
                 
                 if ticker in self.valid_etfs:
@@ -487,12 +498,14 @@ class RedditDataProcessor:
             for ticker in standalone_tickers:
                 # Skip if in negative context
                 if self._has_negative_context(text, ticker):
+                    self.rejection_reasons['negative_context'] += 1
                     continue
                     
                 # Extra validation for ambiguous financial tickers
                 if ticker in self.ambiguous_financial_tickers:
-                    is_valid, confidence = self._validate_ambiguous_financial_ticker(text, ticker)
+                    is_valid, _ = self._validate_ambiguous_financial_ticker(text, ticker)
                     if not is_valid:
+                        self.rejection_reasons['ambiguous_ticker'] += 1
                         continue
                 
                 if ticker in self.valid_etfs:
@@ -522,6 +535,10 @@ class RedditDataProcessor:
                             has_context, confidence = self._has_financial_context(text, ticker)
                             if has_context and confidence >= 0.95:
                                 tickers.add(ticker)
+                            else:
+                                self.rejection_reasons['low_confidence'] += 1
+                        else:
+                            self.rejection_reasons['common_word'] += 1
                     except Exception as e:
                         logger.debug(f"Error validating common word ticker {ticker}: {str(e)}")
                         continue
@@ -533,6 +550,8 @@ class RedditDataProcessor:
                         has_entity, entity_boost = self.entity_linker.validate_context(text, ticker)
                         if has_context and has_entity and confidence >= 0.8:
                             tickers.add(ticker)
+                        else:
+                            self.rejection_reasons['ambiguous_ticker'] += 1
                     except Exception as e:
                         logger.debug(f"Error validating ambiguous ticker {ticker}: {str(e)}")
                         continue
@@ -544,6 +563,8 @@ class RedditDataProcessor:
                         has_entity, entity_boost = self.entity_linker.validate_context(text, ticker)
                         if has_context and (has_entity or confidence >= 0.7):
                             tickers.add(ticker)
+                        else:
+                            self.rejection_reasons['no_context'] += 1
                     except Exception as e:
                         logger.debug(f"Error validating ticker {ticker}: {str(e)}")
                         continue
@@ -695,7 +716,7 @@ class RedditDataProcessor:
         """Process raw Reddit data with enhanced features and debug logging."""
         try:
             print(f"\n{Fore.CYAN}Processing Reddit Data Pipeline{Style.RESET_ALL}")
-            total_steps = 8  # Updated to include per-ticker file generation
+            total_steps = 9  # Updated to include figure generation
             
             # Step 1: Initial Processing
             print(f"\n{Fore.YELLOW}[1/{total_steps}] Initial Data Processing{Style.RESET_ALL}")
@@ -954,6 +975,21 @@ class RedditDataProcessor:
                 processed_df['tickers'] = processed_df['tickers'].apply(
                     lambda x: {ticker for ticker in x if ticker in valid_tickers}
                 )
+                
+                # After Step 8 (Generate Per-Ticker Sentiment Files)
+                print(f"\n{Fore.YELLOW}[9/{total_steps}] Generating Analysis Figures{Style.RESET_ALL}")
+                
+                try:
+                    # Generate all figures
+                    self.figure_generator.generate_all_figures(
+                        processed_df,
+                        rejection_reasons=dict(self.rejection_reasons)
+                    )
+                    print(f"{Fore.GREEN}✓ Successfully generated analysis figures{Style.RESET_ALL}")
+                    
+                except Exception as e:
+                    logger.error(f"Error generating figures: {str(e)}")
+                    print(f"{Fore.RED}✗ Error generating figures: {str(e)}{Style.RESET_ALL}")
                 
                 return processed_df, daily_metrics
             else:

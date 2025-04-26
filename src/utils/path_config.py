@@ -9,6 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Main directories
 DATA_DIR = PROJECT_ROOT / "data"
 SRC_DIR = PROJECT_ROOT / "src"
+FIGURES_DIR = PROJECT_ROOT / "figures"
 
 # Data subdirectories
 RAW_DIR = DATA_DIR / "raw"
@@ -83,7 +84,8 @@ _REQUIRED_DIRECTORIES = [
     TICKERS_DIR,
     TICKER_GENERAL_DIR,
     TICKER_SENTIMENT_DIR,
-    MODEL_DIR
+    MODEL_DIR,
+    FIGURES_DIR
 ]
 
 def _ensure_directories_exist():
